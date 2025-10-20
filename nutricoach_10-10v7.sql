@@ -1,5 +1,5 @@
 
-\restrict FXTPNSecR8D2yaUgWXl9rjAKuJ93ugwtmEnfwXKuJEe2QWV74arCfseBb1Igt2H
+\restrict aIDWiy59qCHL0muFdfWCyEvJ2gXfJKLyvrCf8B2mi7TCYKDXk8dwa1Ohi7FEl5I
 
 
 SET statement_timeout = 0;
@@ -2743,7 +2743,7 @@ CREATE TABLE IF NOT EXISTS "public"."dynamic_prompts" (
     "consideracoes_finais_text" "text",
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "prompt_final" "text",
-    "last_response_id" "text"
+    "conversation_id" "text"
 );
 
 
@@ -5263,6 +5263,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict FXTPNSecR8D2yaUgWXl9rjAKuJ93ugwtmEnfwXKuJEe2QWV74arCfseBb1Igt2H
+\unrestrict aIDWiy59qCHL0muFdfWCyEvJ2gXfJKLyvrCf8B2mi7TCYKDXk8dwa1Ohi7FEl5I
 
 RESET ALL;
