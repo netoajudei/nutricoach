@@ -37,7 +37,7 @@ serve(async (req)=>{
     console.log(`[Orquestrador] Last response ID: ${last_response_id || 'NULL (primeira)'}`);
     // Montar payload (IGUAL FUNÇÃO 1: previous_response_id)
     const payload = {
-      model: Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini',
+      model: Deno.env.get('OPENAI_MODEL') || 'gpt-5-mini',
       instructions: prompt_final,
       input: perguntaUsuario,
       store: true,
