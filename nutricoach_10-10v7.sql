@@ -1,5 +1,5 @@
 
-\restrict NMAFiDse6TerkNmlYmqm0P6zb5OUBYAaFwRFJFTFtiN1KFrPyGeTG4HSlE96OKs
+\restrict oQ0RlasJbwO3VcbeJExSGpEPIeofDSYuQwX67cqGThK41Y0JURJbcuDTjbhzzYs
 
 
 SET statement_timeout = 0;
@@ -2207,7 +2207,7 @@ CREATE OR REPLACE FUNCTION "public"."schedule_aggregation_on_new_message"() RETU
  * @name schedule_aggregation_on_new_message
  * @description Acionada após a inserção de uma nova mensagem, esta
  * função implementa a lógica de agendamento "sob demanda".
- * @changelog v1.1: Corrigida a sintaxe de construção do comando para o pg_cron.
+ * @changelog v1.2: Reduzido tempo de agregação para 5 segundos.
  */
 DECLARE
     v_agendado BOOLEAN;
@@ -2220,20 +2220,17 @@ BEGIN
 
     -- Se não houver agendamento ativo, cria um
     IF v_agendado = false THEN
-        RAISE NOTICE '[Trigger Agendador] Nenhuma agregação pendente para o aluno %. Agendando para daqui a 10 segundos...', NEW.aluno_id;
+        RAISE NOTICE '[Trigger Agendador] Nenhuma agregação pendente para o aluno %. Agendando para daqui a 5 segundos...', NEW.aluno_id;
 
-        -- <<-- INÍCIO DA CORREÇÃO -->>
         -- Constrói o comando a ser executado de forma segura usando format()
-        -- %L é um especificador que trata o valor como um literal SQL, evitando injeção de SQL.
         v_command := format('SELECT public.run_aggregation_and_reset_flag(%L)', NEW.aluno_id);
         
         -- Agenda a execução da função principal usando o comando formatado
         PERFORM cron.schedule(
             'aggregate-' || NEW.aluno_id::text, -- Nome do job único
-            '10 seconds', -- Atraso para a execução
+            '5 seconds', -- <<-- ALTERAÇÃO AQUI
             v_command -- A variável com o comando correto
         );
-        -- <<-- FIM DA CORREÇÃO -->>
 
         -- Marca o aluno como "agendamento pendente" para evitar duplicatas
         UPDATE public.alunos
@@ -4125,6 +4122,10 @@ CREATE INDEX "idx_dynamic_prompts_aluno_id" ON "public"."dynamic_prompts_old" US
 
 
 
+CREATE INDEX "idx_dynamic_prompts_conversation_id" ON "public"."dynamic_prompts" USING "btree" ("conversation_id");
+
+
+
 CREATE INDEX "idx_dynamic_prompts_date" ON "public"."dynamic_prompts_old" USING "btree" ("aluno_id", "data_validade" DESC);
 
 
@@ -5264,6 +5265,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict NMAFiDse6TerkNmlYmqm0P6zb5OUBYAaFwRFJFTFtiN1KFrPyGeTG4HSlE96OKs
+\unrestrict oQ0RlasJbwO3VcbeJExSGpEPIeofDSYuQwX67cqGThK41Y0JURJbcuDTjbhzzYs
 
 RESET ALL;
