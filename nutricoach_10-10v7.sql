@@ -1,5 +1,5 @@
 
-\restrict oQ0RlasJbwO3VcbeJExSGpEPIeofDSYuQwX67cqGThK41Y0JURJbcuDTjbhzzYs
+\restrict hkJUTtgCqmePLAw2Ek1wgucbP5LIxCxNOpAzbTVmrUSw9EfnZmThFM2f07yfke9
 
 
 SET statement_timeout = 0;
@@ -2498,7 +2498,8 @@ CREATE TABLE IF NOT EXISTS "public"."alunos" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "subscription_status" character varying(30) DEFAULT 'trial'::character varying,
     "last_interaction_at" timestamp with time zone,
-    "agregacao_agendada" boolean DEFAULT false NOT NULL
+    "agregacao_agendada" boolean DEFAULT false NOT NULL,
+    "aguardando_confirmacao" "jsonb"
 );
 
 
@@ -4042,6 +4043,10 @@ ALTER TABLE ONLY "public"."workout_programs"
 
 
 
+CREATE INDEX "idx_alunos_aguardando" ON "public"."alunos" USING "btree" ((("aguardando_confirmacao" ->> 'aguardando'::"text")));
+
+
+
 CREATE INDEX "idx_alunos_created_at" ON "public"."alunos" USING "btree" ("created_at");
 
 
@@ -5265,6 +5270,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict oQ0RlasJbwO3VcbeJExSGpEPIeofDSYuQwX67cqGThK41Y0JURJbcuDTjbhzzYs
+\unrestrict hkJUTtgCqmePLAw2Ek1wgucbP5LIxCxNOpAzbTVmrUSw9EfnZmThFM2f07yfke9
 
 RESET ALL;

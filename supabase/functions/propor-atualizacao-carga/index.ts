@@ -1,122 +1,337 @@
 /**
- * @name propor-atualizacao-carga
- * @version 1.0.0
- * @author NutriCoach AI Development
- * @date 2025-10-15
- *
+ * @name orquestrador-ia
+ * @version 10.0.0
+ * @author NutriCoach AI Development Team
+ * @date 2025-11-04 01:10:00 -03:00
+ * 
  * @description
- * Esta função é acionada pelo `orquestrador-ia` após uma `tool call`
- * que identifica uma variação de carga em um exercício. A função calcula o
- * novo peso, constrói uma mensagem de confirmação contextual e a envia
- * ao aluno com botões de "Sim" e "Não" via WhatsApp.
- *
- * @endpoint POST /functions/v1/propor-atualizacao-carga
- *
- * @param {object} body
- * @param {string} body.exercicio_id - O ID do exercício a ser atualizado.
- * @param {number} body.variacao_kg - A variação de peso (positiva ou negativa).
- *
- * @returns {Response} Uma resposta de sucesso ou erro.
- */ /**
- * @name propor-atualizacao-carga
- * @version 1.0.1
- * @description
- * Envia uma proposta de atualização de carga com botões para o aluno.
- *
+ * Orquestrador principal usando Conversations API da OpenAI.
+ * Gerencia conversas, detecta tool calls e aciona funções backend.
+ * 
  * @changelog
- * - v1.0.1: Adicionado o campo obrigatório `header` na chamada da API
- * de botões da `wa.me`, corrigindo o erro de validação 400.
+ * - v10.0.0 (2025-11-04): Implementado sistema de bloqueio educado
+ *   - Orquestrador agora passa conversation_id e tool_call_id para funções propor
+ *   - Orquestrador ENCERRA após invocar funções propor (não finaliza function calling)
+ *   - Bloqueio permanece ativo até confirmação/cancelamento do usuário
+ *   - Alterado propor_atualizacao_carga de RPC para Edge Function
+ * 
+ * @workflow
+ * ROTA A (Com Tool Call):
+ * 1. Detecta tool call (registrar_consumo ou identificar_variacao_carga)
+ * 2. Invoca função propor correspondente passando conversation_id e tool_call_id
+ * 3. ENCERRA (não finaliza function calling, não envia resposta)
+ * 
+ * ROTA B (Sem Tool Call):
+ * 1. Envia resposta normal ao usuário
+ * 2. Registra tokens
+ * 3. Retorna sucesso
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
 };
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-5-mini';
 serve(async (req)=>{
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
       headers: corsHeaders
     });
   }
+  const body = await req.json().catch(()=>({}));
+  const mensagem_id = body.mensagem_id;
   try {
-    const { exercicio_id, variacao_kg } = await req.json();
-    if (!exercicio_id || variacao_kg === undefined) {
-      throw new Error("Parâmetros `exercicio_id` e `variacao_kg` são obrigatórios.");
-    }
+    console.log('[Orquestrador v10.0.0] 🚀 Conversations API + Bloqueio Educado');
+    if (!mensagem_id) throw new Error("O 'mensagem_id' é obrigatório.");
     const supabase = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
-    const { data: dadosExercicio, error: fetchError } = await supabase.from('workout_exercises').select(`
-        nome_exercicio,
-        carga_kg,
-        program_workouts (
-          workout_programs (
-            aluno_id,
-            alunos ( whatsapp )
-          )
-        )
-      `).eq('id', exercicio_id).single();
-    if (fetchError || !dadosExercicio) {
-      throw new Error(`Exercício com ID ${exercicio_id} não encontrado: ${fetchError?.message}`);
-    }
-    const nomeExercicio = dadosExercicio.nome_exercicio;
-    const cargaAtual = dadosExercicio.carga_kg;
-    const alunoWhatsapp = dadosExercicio.program_workouts?.workout_programs?.alunos?.whatsapp;
-    if (!alunoWhatsapp) {
-      throw new Error("Não foi possível encontrar o número de WhatsApp do aluno.");
-    }
-    const nova_carga = cargaAtual + variacao_kg;
-    let textoMensagem = '';
-    if (variacao_kg > 0) {
-      textoMensagem = `Notei que você progrediu no exercício *${nomeExercicio}*! 💪\n\nDeseja atualizar a carga de ${cargaAtual}kg para **${nova_carga}kg** no seu plano para os próximos treinos?`;
-    } else {
-      textoMensagem = `Notei que você ajustou a carga no exercício *${nomeExercicio}*.\n\nDeseja reduzir a carga de ${cargaAtual}kg para **${nova_carga}kg** no seu plano?`;
-    }
-    const yesPayload = JSON.stringify({
-      action: "confirmar_update_carga",
-      exercicio_id: exercicio_id,
-      nova_carga: nova_carga
-    });
-    const noPayload = JSON.stringify({
-      action: "cancelar_update_carga",
-      exercicio_id: exercicio_id
-    });
-    const apiKey = Deno.env.get('WAME_API_KEY');
-    if (!apiKey) throw new Error("Variável de ambiente WAME_API_KEY não configurada.");
-    const apiUrl = `https://us.api-wa.me/${apiKey}/message/button_reply`;
-    const payload = {
-      to: alunoWhatsapp,
-      // <<-- CORREÇÃO AQUI -->>
-      header: {
-        title: "Confirmação de Progresso 🚀" // Adiciona o cabeçalho obrigatório
-      },
-      text: textoMensagem,
-      footer: "Escolha uma opção:",
-      buttons: [
-        {
-          type: "quick_reply",
-          id: yesPayload,
-          text: "Sim, atualizar!"
+    // ============================================
+    // 1. BUSCAR MENSAGEM
+    // ============================================
+    const { data: mensagemData, error: msgError } = await supabase.from('mensagens_temporarias').select('aluno_id, mensagem').eq('id', mensagem_id).single();
+    if (msgError) throw new Error(`Mensagem não encontrada: ${msgError.message}`);
+    const { aluno_id, mensagem: perguntaUsuario } = mensagemData;
+    // ============================================
+    // 2. BUSCAR PROMPT DINÂMICO + CONVERSATION_ID
+    // ============================================
+    const { data: promptData } = await supabase.from('dynamic_prompts').select('id, prompt_final, conversation_id').eq('aluno_id', aluno_id).single();
+    if (!promptData) throw new Error('Dynamic prompt não encontrado');
+    let { prompt_final, conversation_id } = promptData;
+    const promptId = promptData.id;
+    if (!prompt_final) throw new Error('prompt_final está vazio');
+    console.log(`[Orquestrador] Prompt: ${prompt_final.length} chars`);
+    console.log(`[Orquestrador] Conversation ID: ${conversation_id || 'NULL (criar novo)'}`);
+    // ============================================
+    // 3. CRIAR CONVERSATION SE NÃO EXISTIR
+    // ============================================
+    if (!conversation_id) {
+      console.log('[Orquestrador] 📝 Criando nova conversation...');
+      const createConvResponse = await fetch('https://api.openai.com/v1/conversations', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json'
         },
-        {
-          type: "quick_reply",
-          id: noPayload,
-          text: "Não, manter"
+        body: JSON.stringify({
+          metadata: {
+            aluno_id: aluno_id,
+            tipo: 'coaching_nutricional'
+          }
+        })
+      });
+      if (!createConvResponse.ok) {
+        const errorText = await createConvResponse.text();
+        throw new Error(`Erro ao criar conversation: ${errorText}`);
+      }
+      const convData = await createConvResponse.json();
+      conversation_id = convData.id;
+      console.log(`[Orquestrador] ✅ Conversation criada: ${conversation_id}`);
+      await supabase.from('dynamic_prompts').update({
+        conversation_id: conversation_id
+      }).eq('id', promptId);
+    }
+    // ============================================
+    // 4. DEFINIR TOOLS
+    // ============================================
+    const tools = [
+      {
+        type: 'function',
+        name: 'identificar_variacao_carga',
+        description: 'Calcula a variação de carga proposta para um exercício e retorna o identificador, a variação de carga, e o nome do exercício.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          required: [
+            'id_exercicio',
+            'variacao_de_carga',
+            'nome_exercicio'
+          ],
+          properties: {
+            id_exercicio: {
+              type: 'string'
+            },
+            variacao_de_carga: {
+              type: 'number'
+            },
+            nome_exercicio: {
+              type: 'string'
+            }
+          },
+          additionalProperties: false
         }
-      ]
+      },
+      {
+        type: 'function',
+        name: 'registrar_consumo',
+        description: 'Extrai informações de macronutrientes, valor calórico, tipo de refeição e consumo de líquidos de uma refeição informada pelo aluno.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          required: [
+            'refeicao',
+            'calorias',
+            'tipo',
+            'carboidratos',
+            'proteinas',
+            'gorduras',
+            'liquidos'
+          ],
+          properties: {
+            refeicao: {
+              type: 'string'
+            },
+            calorias: {
+              type: 'number'
+            },
+            tipo: {
+              type: 'string'
+            },
+            carboidratos: {
+              type: 'number'
+            },
+            proteinas: {
+              type: 'number'
+            },
+            gorduras: {
+              type: 'number'
+            },
+            liquidos: {
+              type: 'number'
+            }
+          },
+          additionalProperties: false
+        }
+      }
+    ];
+    // ============================================
+    // 5. ENVIAR MENSAGEM USANDO CONVERSATIONS
+    // ============================================
+    console.log('[Orquestrador] 📤 Enviando mensagem...');
+    const payload = {
+      model: OPENAI_MODEL,
+      conversation: conversation_id,
+      store: true,
+      instructions: prompt_final,
+      input: perguntaUsuario,
+      tools: tools
     };
-    console.log(`[Propor Carga] Enviando proposta de atualização para ${alunoWhatsapp}...`);
-    const response = await fetch(apiUrl, {
+    const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(payload)
     });
-    if (!response.ok) {
-      throw new Error(`[WAME] Erro ao enviar mensagem com botão: ${await response.text()}`);
+    if (!openaiResponse.ok) {
+      const errorBody = await openaiResponse.text();
+      throw new Error(`Erro OpenAI: ${errorBody}`);
     }
+    const responseData = await openaiResponse.json();
+    console.log(`[Orquestrador] ✅ Response ID: ${responseData.id}`);
+    console.log(`[Orquestrador] 📊 Tokens: Input=${responseData.usage?.input_tokens}, Cached=${responseData.usage?.input_tokens_details?.cached_tokens ?? 0}`);
+    // ============================================
+    // 6. DETECTAR TOOL CALL NO OUTPUT
+    // ============================================
+    let toolCallItem = null;
+    for (const item of responseData.output || []){
+      if (item.type === 'function_call' || item.type === 'tool_call') {
+        toolCallItem = item;
+        console.log(`[Orquestrador] 🔧 Tool detectada: ${item.name}`);
+        console.log(`[Orquestrador] 📋 Tool ID: ${item.id}`);
+        break;
+      }
+    }
+    // ============================================
+    // ROTA A: COM TOOL CALL
+    // ============================================
+    if (toolCallItem) {
+      console.log('[Orquestrador] 🔴 ROTA A: Processando tool call');
+      try {
+        const toolArgs = typeof toolCallItem.arguments === 'string' ? JSON.parse(toolCallItem.arguments) : toolCallItem.arguments;
+        console.log('[Orquestrador] 📥 Argumentos:', toolArgs);
+        // ============================================
+        // EXECUTAR FUNÇÃO BACKEND
+        // ============================================
+        switch(toolCallItem.name){
+          case 'identificar_variacao_carga':
+            {
+              const { id_exercicio, variacao_de_carga, nome_exercicio } = toolArgs;
+              console.log('[Orquestrador] 💪 Executando identificar_variacao_carga');
+              const { error: edgeError } = await supabase.functions.invoke('propor-atualizacao-carga', {
+                body: {
+                  exercicio_id: id_exercicio,
+                  variacao_kg: variacao_de_carga,
+                  conversation_id: conversation_id,
+                  tool_call_id: toolCallItem.id
+                }
+              });
+              if (edgeError) {
+                console.error('[Orquestrador] ❌ Erro na Edge Function:', edgeError);
+                throw edgeError;
+              }
+              console.log('[Orquestrador] ✅ Proposta de carga enviada, ENCERRANDO orquestrador');
+              return new Response(JSON.stringify({
+                success: true,
+                awaiting_confirmation: true,
+                message: 'Aguardando confirmação do usuário',
+                tool: 'identificar_variacao_carga'
+              }), {
+                headers: {
+                  ...corsHeaders,
+                  'Content-Type': 'application/json'
+                },
+                status: 200
+              });
+            }
+          case 'registrar_consumo':
+            {
+              const { refeicao, calorias, tipo, carboidratos, proteinas, gorduras, liquidos } = toolArgs;
+              console.log('[Orquestrador] 🍽️ Executando registrar_consumo');
+              const { error: edgeError } = await supabase.functions.invoke('propor-registro-refeicao', {
+                body: {
+                  aluno_id,
+                  refeicao,
+                  tipo,
+                  calorias,
+                  proteinas,
+                  carboidratos,
+                  gorduras,
+                  liquidos_ml: typeof liquidos === 'number' ? liquidos * 1000 : liquidos,
+                  conversation_id: conversation_id,
+                  tool_call_id: toolCallItem.id
+                }
+              });
+              if (edgeError) {
+                console.error('[Orquestrador] ❌ Erro na Edge Function:', edgeError);
+                throw edgeError;
+              }
+              console.log('[Orquestrador] ✅ Proposta de refeição enviada, ENCERRANDO orquestrador');
+              return new Response(JSON.stringify({
+                success: true,
+                awaiting_confirmation: true,
+                message: 'Aguardando confirmação do usuário',
+                tool: 'registrar_consumo'
+              }), {
+                headers: {
+                  ...corsHeaders,
+                  'Content-Type': 'application/json'
+                },
+                status: 200
+              });
+            }
+          default:
+            throw new Error(`Função não implementada: ${toolCallItem.name}`);
+        }
+      } catch (toolError) {
+        console.error('[Orquestrador] ❌ Erro ao processar tool:', toolError.message);
+        throw toolError;
+      }
+    }
+    // ============================================
+    // ROTA B: SEM TOOL CALL
+    // ============================================
+    console.log('[Orquestrador] 🟢 ROTA B: Resposta normal');
+    let respostaIA = '';
+    for (const item of responseData.output || []){
+      if (item.type === 'message' && item.role === 'assistant') {
+        const textContent = item.content?.find((c)=>c.type === 'output_text');
+        if (textContent) {
+          respostaIA = textContent.text;
+          break;
+        }
+      }
+    }
+    if (!respostaIA) throw new Error('Resposta vazia');
+    console.log(`[Orquestrador] 💬 Resposta: ${respostaIA.substring(0, 100)}...`);
+    await supabase.from('mensagens_temporarias').update({
+      resposta: respostaIA
+    }).eq('id', mensagem_id);
+    await supabase.functions.invoke('enviar_menssagem_whatsapp', {
+      body: {
+        aluno_id,
+        mensagem: respostaIA
+      }
+    });
+    supabase.functions.invoke('registrar-tokens', {
+      body: {
+        aluno_id,
+        mensagem_id,
+        modelo_utilizado: responseData.model,
+        input_tokens: responseData.usage?.input_tokens ?? 0,
+        cached_tokens: responseData.usage?.input_tokens_details?.cached_tokens ?? 0,
+        output_tokens: responseData.usage?.output_tokens ?? 0,
+        response_id: responseData.id,
+        conversation_id: conversation_id,
+        api_response_body: responseData
+      }
+    }).catch(console.error);
+    console.log('[Orquestrador] ✅ Concluído (ROTA B)');
     return new Response(JSON.stringify({
       success: true,
-      message: "Proposta de atualização enviada ao aluno."
+      rota: 'B',
+      response_id: responseData.id,
+      conversation_id: conversation_id
     }), {
       headers: {
         ...corsHeaders,
@@ -125,12 +340,21 @@ serve(async (req)=>{
       status: 200
     });
   } catch (error) {
-    console.error("🔥 Erro na função propor-atualizacao-carga:", error.message);
+    console.error('[Orquestrador] ❌ ERRO:', error.message);
+    if (mensagem_id) {
+      const supabaseAdmin = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
+      await supabaseAdmin.from('mensagens_temporarias').update({
+        resposta: `ERRO: ${error.message}`
+      }).eq('id', mensagem_id);
+    }
     return new Response(JSON.stringify({
       error: error.message
     }), {
-      status: 500,
-      headers: corsHeaders
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json'
+      },
+      status: 500
     });
   }
 });

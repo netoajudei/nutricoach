@@ -1,8 +1,49 @@
 /**
  * @name propor-registro-refeicao
- * @version 1.2.0 (Restaurada)
+ * @version 2.0.0
+ * @author NutriCoach AI Development Team
+ * @date 2025-11-04 00:59:00 -03:00
+ * 
  * @description
- * Cria registro COM VALORES REAIS (corrigido tipos numéricos)
+ * Edge Function que propõe o registro de uma refeição ao aluno via WhatsApp
+ * com botões de confirmação. Cria o registro pendente no banco e ativa o
+ * sistema de bloqueio educado.
+ * 
+ * @workflow
+ * 1. Recebe dados da refeição do orquestrador (incluindo conversation_id e tool_call_id)
+ * 2. Cria registro pendente em daily_consumption_history (confirmada: false)
+ * 3. Envia botão de confirmação via WhatsApp (WAME API)
+ * 4. SALVA estado de bloqueio em alunos.aguardando_confirmacao
+ * 5. Retorna sucesso
+ * 
+ * @changelog
+ * - v2.0.0 (2025-11-04): Implementado sistema de bloqueio educado
+ *   - Adicionado recebimento de conversation_id e tool_call_id do orquestrador
+ *   - Implementado salvamento de estado em aguardando_confirmacao
+ *   - Payloads dos botões agora salvos para reenvio posterior
+ *   - Bloqueio ativado até confirmação/cancelamento do usuário
+ * 
+ * @param {string} aluno_id - ID do aluno
+ * @param {string} refeicao - Descrição da refeição
+ * @param {string} tipo - Tipo da refeição (café, almoço, jantar, etc)
+ * @param {number} calorias - Total de calorias
+ * @param {number} proteinas - Gramas de proteína
+ * @param {number} carboidratos - Gramas de carboidratos
+ * @param {number} gorduras - Gramas de gorduras
+ * @param {number} liquidos_ml - Mililitros de líquidos
+ * @param {string} conversation_id - ID da conversation OpenAI (NOVO)
+ * @param {string} tool_call_id - ID do tool call OpenAI (NOVO)
+ * 
+ * @returns {object} { success, message, registro_id }
+ * 
+ * @security
+ * - Usa SUPABASE_SERVICE_ROLE_KEY
+ * - API key WAME buscada de config_sistema
+ * 
+ * @dependencies
+ * - Supabase Client
+ * - WAME API (button_reply endpoint)
+ * - Tabelas: alunos, daily_consumption_history, config_sistema
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
@@ -16,31 +57,22 @@ serve(async (req)=>{
     });
   }
   try {
-    console.log('[PROPOR REFEIÇÃO] ========================================');
     console.log('[PROPOR REFEIÇÃO] 🚀 Iniciando função');
     const body = await req.json();
-    console.log('[PROPOR REFEIÇÃO] 📦 Payload recebido:', JSON.stringify(body, null, 2));
-    const { aluno_id, refeicao, tipo, calorias, proteinas, carboidratos, gorduras, liquidos_ml } = body;
+    const { aluno_id, refeicao, tipo, calorias, proteinas, carboidratos, gorduras, liquidos_ml, conversation_id, tool_call_id } = body;
     if (!aluno_id || !refeicao || !tipo) {
-      throw new Error('Parâmetros obrigatórios faltando: aluno_id, refeicao, tipo');
+      throw new Error('Parâmetros obrigatórios faltando');
     }
-    console.log('[PROPOR REFEIÇÃO] ✅ Validação de parâmetros OK');
     const supabase = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
     const { data: aluno, error: alunoError } = await supabase.from('alunos').select('whatsapp').eq('id', aluno_id).single();
     if (alunoError || !aluno) {
-      console.error('[PROPOR REFEIÇÃO] ❌ Erro ao buscar aluno:', alunoError);
-      throw new Error(`Aluno não encontrado. ID: ${aluno_id}`);
+      throw new Error(`Aluno não encontrado`);
     }
-    console.log('[PROPOR REFEIÇÃO] ✅ WhatsApp encontrado:', aluno.whatsapp);
     const horario_atual = new Intl.DateTimeFormat('pt-BR', {
       timeZone: 'America/Sao_Paulo',
       hour: '2-digit',
       minute: '2-digit'
     }).format(new Date());
-    console.log('[PROPOR REFEIÇÃO] ⏰ Horário:', horario_atual);
-    // ========================================
-    // CRIAR REGISTRO COM VALORES REAIS
-    // ========================================
     console.log('[PROPOR REFEIÇÃO] 💾 Criando registro...');
     const { data: registroData, error: registroError } = await supabase.from('daily_consumption_history').insert({
       aluno_id: aluno_id,
@@ -54,11 +86,10 @@ serve(async (req)=>{
       confirmada: false
     }).select('id').single();
     if (registroError) {
-      console.error('[PROPOR REFEIÇÃO] ❌ Erro ao criar registro:', registroError);
       throw new Error(`Erro ao criar registro: ${registroError.message}`);
     }
     const registro_id = registroData.id;
-    console.log('[PROPOR REFEIÇÃO] ✅ Registro criado com ID:', registro_id);
+    console.log('[PROPOR REFEIÇÃO] ✅ Registro criado:', registro_id);
     const mensagem_texto = `🍽️ Confirmar Refeição - ${tipo.toUpperCase()}
 
 📋 O QUE VOCÊ COMEU:
@@ -82,11 +113,9 @@ Confirmar este registro?`;
       registro_id: registro_id,
       aluno_id: aluno_id
     });
-    console.log('[PROPOR REFEIÇÃO] 🔑 Buscando WAME_API_KEY...');
     const { data: configData, error: configError } = await supabase.from('config_sistema').select('valor').eq('chave', 'wame_api_key').single();
     if (configError || !configData) {
-      console.error('[PROPOR REFEIÇÃO] ❌ Erro ao buscar API key:', configError);
-      throw new Error('WAME_API_KEY não encontrada em config_sistema');
+      throw new Error('WAME_API_KEY não encontrada');
     }
     const api_key = configData.valor;
     const api_url = `https://us.api-wa.me/${api_key}/message/button_reply`;
@@ -110,7 +139,7 @@ Confirmar este registro?`;
         }
       ]
     };
-    console.log('[PROPOR REFEIÇÃO] 📡 Enviando requisição para WAME...');
+    console.log('[PROPOR REFEIÇÃO] 📡 Enviando botão...');
     const wameResponse = await fetch(api_url, {
       method: 'POST',
       headers: {
@@ -118,22 +147,34 @@ Confirmar este registro?`;
       },
       body: JSON.stringify(request_body)
     });
-    console.log('[PROPOR REFEIÇÃO] 📊 Status da resposta:', wameResponse.status);
-    const responseBody = await wameResponse.text();
     if (!wameResponse.ok) {
-      console.error('[PROPOR REFEIÇÃO] ❌ Erro na API WAME');
+      const responseBody = await wameResponse.text();
       throw new Error(`[WAME] Erro ${wameResponse.status}: ${responseBody}`);
     }
-    console.log('[PROPOR REFEIÇÃO] ✅ Mensagem enviada com sucesso!');
+    console.log('[PROPOR REFEIÇÃO] 💾 Salvando estado de bloqueio...');
+    await supabase.from('alunos').update({
+      aguardando_confirmacao: {
+        aguardando: true,
+        conversation_id: conversation_id,
+        tool_call_id: tool_call_id,
+        button_payload_sim: {
+          action: 'confirmar_registro_refeicao',
+          registro_id: registro_id,
+          aluno_id: aluno_id
+        },
+        button_payload_nao: {
+          action: 'cancelar_registro_refeicao',
+          registro_id: registro_id,
+          aluno_id: aluno_id
+        },
+        created_at: new Date().toISOString()
+      }
+    }).eq('id', aluno_id);
+    console.log('[PROPOR REFEIÇÃO] ✅ Bloqueio ativado');
     return new Response(JSON.stringify({
       success: true,
-      message: 'Proposta de registro enviada ao aluno',
-      detalhes: {
-        registro_id: registro_id,
-        tipo_refeicao: tipo,
-        whatsapp: aluno.whatsapp,
-        horario: horario_atual
-      }
+      message: 'Proposta enviada e bloqueio ativado',
+      registro_id: registro_id
     }), {
       headers: {
         ...corsHeaders,
@@ -142,8 +183,7 @@ Confirmar este registro?`;
       status: 200
     });
   } catch (error) {
-    console.error('[PROPOR REFEIÇÃO] 💥 ERRO FATAL:', error.message);
-    console.error('[PROPOR REFEIÇÃO] 💥 Stack:', error.stack);
+    console.error('[PROPOR REFEIÇÃO] ❌ ERRO:', error.message);
     return new Response(JSON.stringify({
       error: error.message
     }), {
