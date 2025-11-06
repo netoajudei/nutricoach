@@ -1,5 +1,5 @@
 
-\restrict hrPDtu7fiPrIFh75Yx5uNRFhYPGEpo0alHTdKvF2n4vNuwim1XF7ERdtVEfeZSd
+\restrict PIU73Mao5btS6pCZvBMdi3NB13zHY7UOdq0igXL2bxJGQJTTDIEfRsxed50dEvH
 
 
 SET statement_timeout = 0;
@@ -2566,6 +2566,49 @@ COMMENT ON COLUMN "public"."body_metrics"."medidas_json" IS 'JSON para armazenar
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."botoes_ativos" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "aluno_id" "uuid" NOT NULL,
+    "conversation_id" "text" NOT NULL,
+    "tool_call_id" "text" NOT NULL,
+    "tipo_acao" "text" NOT NULL,
+    "argumentos" "jsonb" NOT NULL,
+    "edge_function" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."botoes_ativos" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."botoes_ativos" IS 'Armazena estado de botões de confirmação pendentes. Apenas um botão ativo por aluno. Deletado após confirmação/cancelamento.';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."aluno_id" IS 'ID do aluno (UNIQUE - apenas um botão por aluno)';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."conversation_id" IS 'ID da conversation OpenAI para finalizar o tool call';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."tool_call_id" IS 'ID do tool call OpenAI que está aguardando resposta';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."tipo_acao" IS 'Tipo de ação pendente (ex: registro_refeicao, update_carga)';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."argumentos" IS 'Argumentos originais da tool call armazenados em JSON';
+
+
+
+COMMENT ON COLUMN "public"."botoes_ativos"."edge_function" IS 'Nome da Edge Function que processa a confirmação/cancelamento';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."completions_old" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
@@ -2808,6 +2851,84 @@ ALTER TABLE "public"."dynamic_prompts_old" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."dynamic_prompts_old" IS 'Tabela depreciada em 13/10/2025. Substituída pela nova tabela `dynamic_prompts` com colunas JSONB modulares. Será removida em breve.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."exercicios_template" (
+    "id" integer NOT NULL,
+    "nome_exercicio" "text" NOT NULL,
+    "grupo_muscular" "text" NOT NULL,
+    CONSTRAINT "chk_grupo_muscular" CHECK (("grupo_muscular" = ANY (ARRAY['Peito'::"text", 'Costas'::"text", 'Perna'::"text", 'Ombro'::"text", 'Braço'::"text", 'Abdômen'::"text"])))
+);
+
+
+ALTER TABLE "public"."exercicios_template" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."exercicios_template" IS 'Tabela mestre (template) de todos os exercícios de academia disponíveis no sistema.';
+
+
+
+COMMENT ON COLUMN "public"."exercicios_template"."id" IS 'ID numérico auto-incrementado para fácil referência.';
+
+
+
+COMMENT ON COLUMN "public"."exercicios_template"."grupo_muscular" IS 'O grupo muscular primário treinado pelo exercício.';
+
+
+
+CREATE SEQUENCE IF NOT EXISTS "public"."exercicios_template_id_seq"
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE "public"."exercicios_template_id_seq" OWNER TO "postgres";
+
+
+ALTER SEQUENCE "public"."exercicios_template_id_seq" OWNED BY "public"."exercicios_template"."id";
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."funcoes_ia" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "nome_funcao" "text" NOT NULL,
+    "definicao_openai" "jsonb" NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "contexto" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "edge_function" "text"
+);
+
+
+ALTER TABLE "public"."funcoes_ia" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."funcoes_ia" IS 'Armazena as definições de ferramentas (functions) da OpenAI para serem injetadas dinamicamente no orquestrador da IA.';
+
+
+
+COMMENT ON COLUMN "public"."funcoes_ia"."nome_funcao" IS 'O nome exato da função (ex: "propor_atualizacao_carga").';
+
+
+
+COMMENT ON COLUMN "public"."funcoes_ia"."definicao_openai" IS 'O objeto JSON completo no formato esperado pela API de "tools" da OpenAI.';
+
+
+
+COMMENT ON COLUMN "public"."funcoes_ia"."is_active" IS 'Flag para habilitar ou desabilitar o uso desta função pela IA.';
+
+
+
+COMMENT ON COLUMN "public"."funcoes_ia"."contexto" IS 'Opcional. Usado para filtrar funções (ex: "nutricao", "treino").';
+
+
+
+COMMENT ON COLUMN "public"."funcoes_ia"."edge_function" IS 'Nome da Edge Function (ex: "propor-registro-refeicao") que o orquestrador deve invocar quando esta ferramenta for chamada pela IA.';
 
 
 
@@ -3808,7 +3929,9 @@ CREATE TABLE IF NOT EXISTS "public"."workout_exercises" (
     "repeticoes" character varying(20),
     "carga_kg" numeric,
     "descanso_segundos" smallint,
-    "observacoes" "text"
+    "observacoes" "text",
+    "exercicio_template_id" integer,
+    "grupo_muscular" "text"
 );
 
 
@@ -3820,6 +3943,14 @@ COMMENT ON TABLE "public"."workout_exercises" IS 'Detalha cada exercício dentro
 
 
 COMMENT ON COLUMN "public"."workout_exercises"."carga_kg" IS 'A carga recomendada para o exercício. Este campo será frequentemente atualizado.';
+
+
+
+COMMENT ON COLUMN "public"."workout_exercises"."exercicio_template_id" IS 'FK para a tabela exercicios_template. Padroniza o exercício.';
+
+
+
+COMMENT ON COLUMN "public"."workout_exercises"."grupo_muscular" IS 'Dado desnormalizado (copiado do template) para otimizar queries rápidas do chatbot, evitando joins.';
 
 
 
@@ -3848,6 +3979,10 @@ COMMENT ON TABLE "public"."workout_plans_old" IS 'Tabela depreciada em 13/10/202
 
 
 
+ALTER TABLE ONLY "public"."exercicios_template" ALTER COLUMN "id" SET DEFAULT "nextval"('"public"."exercicios_template_id_seq"'::"regclass");
+
+
+
 ALTER TABLE ONLY "public"."achievements"
     ADD CONSTRAINT "achievements_pkey" PRIMARY KEY ("id");
 
@@ -3865,6 +4000,16 @@ ALTER TABLE ONLY "public"."alunos"
 
 ALTER TABLE ONLY "public"."body_metrics"
     ADD CONSTRAINT "body_metrics_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."botoes_ativos"
+    ADD CONSTRAINT "botoes_ativos_aluno_id_key" UNIQUE ("aluno_id");
+
+
+
+ALTER TABLE ONLY "public"."botoes_ativos"
+    ADD CONSTRAINT "botoes_ativos_pkey" PRIMARY KEY ("id");
 
 
 
@@ -3910,6 +4055,26 @@ ALTER TABLE ONLY "public"."dynamic_prompts_old"
 
 ALTER TABLE ONLY "public"."dynamic_prompts"
     ADD CONSTRAINT "dynamic_prompts_pkey1" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."exercicios_template"
+    ADD CONSTRAINT "exercicios_template_nome_exercicio_key" UNIQUE ("nome_exercicio");
+
+
+
+ALTER TABLE ONLY "public"."exercicios_template"
+    ADD CONSTRAINT "exercicios_template_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."funcoes_ia"
+    ADD CONSTRAINT "funcoes_ia_nome_funcao_key" UNIQUE ("nome_funcao");
+
+
+
+ALTER TABLE ONLY "public"."funcoes_ia"
+    ADD CONSTRAINT "funcoes_ia_pkey" PRIMARY KEY ("id");
 
 
 
@@ -4063,6 +4228,18 @@ CREATE INDEX "idx_body_metrics_data_medicao" ON "public"."body_metrics" USING "b
 
 
 
+CREATE INDEX "idx_botoes_ativos_aluno_id" ON "public"."botoes_ativos" USING "btree" ("aluno_id");
+
+
+
+CREATE INDEX "idx_botoes_ativos_created_at" ON "public"."botoes_ativos" USING "btree" ("created_at");
+
+
+
+CREATE INDEX "idx_botoes_ativos_tipo_acao" ON "public"."botoes_ativos" USING "btree" ("tipo_acao");
+
+
+
 CREATE INDEX "idx_completions_aluno_id" ON "public"."completions_old" USING "btree" ("aluno_id");
 
 
@@ -4136,6 +4313,10 @@ CREATE INDEX "idx_dynamic_prompts_date" ON "public"."dynamic_prompts_old" USING 
 
 
 CREATE UNIQUE INDEX "idx_dynamic_prompts_unique" ON "public"."dynamic_prompts_old" USING "btree" ("aluno_id", "data_validade") WHERE ("is_active" = true);
+
+
+
+CREATE INDEX "idx_funcoes_ia_active" ON "public"."funcoes_ia" USING "btree" ("is_active") WHERE ("is_active" = true);
 
 
 
@@ -4347,7 +4528,7 @@ CREATE OR REPLACE TRIGGER "trigger_saude_e_rotina_changes" AFTER INSERT OR DELET
 
 
 
-CREATE OR REPLACE TRIGGER "trigger_schedule_aggregation" AFTER INSERT ON "public"."mensagens_temporarias" FOR EACH ROW WHEN ((("new"."tipo_mensagem")::"text" = 'RECEBIDA'::"text")) EXECUTE FUNCTION "public"."schedule_aggregation_on_new_message"();
+CREATE OR REPLACE TRIGGER "trigger_update_funcoes_ia_updated_at" BEFORE UPDATE ON "public"."funcoes_ia" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
 
 
 
@@ -4415,6 +4596,16 @@ ALTER TABLE ONLY "public"."dynamic_prompts_old"
 
 ALTER TABLE ONLY "public"."dynamic_prompts"
     ADD CONSTRAINT "dynamic_prompts_aluno_id_fkey1" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."botoes_ativos"
+    ADD CONSTRAINT "fk_botoes_ativos_aluno" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."workout_exercises"
+    ADD CONSTRAINT "fk_exercicio_template" FOREIGN KEY ("exercicio_template_id") REFERENCES "public"."exercicios_template"("id") ON DELETE SET NULL;
 
 
 
@@ -4527,7 +4718,14 @@ CREATE POLICY "Service role can read config" ON "public"."config_sistema" FOR SE
 
 
 
+CREATE POLICY "Service role pode ler funcoes_ia" ON "public"."funcoes_ia" FOR SELECT TO "service_role" USING (true);
+
+
+
 ALTER TABLE "public"."config_sistema" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."funcoes_ia" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -4994,6 +5192,12 @@ GRANT ALL ON TABLE "public"."body_metrics" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."botoes_ativos" TO "anon";
+GRANT ALL ON TABLE "public"."botoes_ativos" TO "authenticated";
+GRANT ALL ON TABLE "public"."botoes_ativos" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."completions_old" TO "anon";
 GRANT ALL ON TABLE "public"."completions_old" TO "authenticated";
 GRANT ALL ON TABLE "public"."completions_old" TO "service_role";
@@ -5039,6 +5243,24 @@ GRANT ALL ON TABLE "public"."dynamic_prompts" TO "service_role";
 GRANT ALL ON TABLE "public"."dynamic_prompts_old" TO "anon";
 GRANT ALL ON TABLE "public"."dynamic_prompts_old" TO "authenticated";
 GRANT ALL ON TABLE "public"."dynamic_prompts_old" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."exercicios_template" TO "anon";
+GRANT ALL ON TABLE "public"."exercicios_template" TO "authenticated";
+GRANT ALL ON TABLE "public"."exercicios_template" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."funcoes_ia" TO "anon";
+GRANT ALL ON TABLE "public"."funcoes_ia" TO "authenticated";
+GRANT ALL ON TABLE "public"."funcoes_ia" TO "service_role";
 
 
 
@@ -5270,6 +5492,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict hrPDtu7fiPrIFh75Yx5uNRFhYPGEpo0alHTdKvF2n4vNuwim1XF7ERdtVEfeZSd
+\unrestrict PIU73Mao5btS6pCZvBMdi3NB13zHY7UOdq0igXL2bxJGQJTTDIEfRsxed50dEvH
 
 RESET ALL;

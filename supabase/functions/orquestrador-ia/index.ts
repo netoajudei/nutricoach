@@ -2,25 +2,25 @@
  * @name orquestrador-ia
  * @version 11.0.0
  * @author NutriCoach AI Development Team
- * @date 2025-11-04 09:50:00 -10:00
+ * @date 2025-11-04 22:45:00 -03:00
  * 
  * @description
  * Orquestrador principal usando Conversations API da OpenAI.
- * Gerencia conversas, detecta tool calls e aciona funções backend.
+ * Agora com sistema de ferramentas DINÂMICO carregado do banco de dados.
  * 
  * @changelog
- * - v11.0.0 (2025-11-04): SIMPLIFICAÇÃO TOTAL
- *   - Orquestrador APENAS invoca funções propor e ENCERRA
- *   - NÃO finaliza function calling (será feito nos botões)
- *   - NÃO envia resposta ao usuário (será feito nos botões)
- *   - Passa conversation_id e tool_call_id para funções propor
- *   - Bloqueio permanece ativo até confirmação/cancelamento
+ * - v11.0.0 (2025-11-04): Sistema de ferramentas dinâmico
+ *   - Tools carregadas da tabela funcoes_ia
+ *   - Roteamento dinâmico via coluna edge_function
+ *   - Formato padronizado de chamadas (aluno_id, conversation_id, tool_call_id, argumentos)
+ *   - Código simplificado sem switch gigante
  * 
  * @workflow
  * ROTA A (Com Tool Call):
  * 1. Detecta tool call
- * 2. Invoca função propor passando conversation_id e tool_call_id
- * 3. ENCERRA (fim do processo)
+ * 2. Busca edge_function correspondente no banco
+ * 3. Invoca edge function com formato padronizado
+ * 4. ENCERRA
  * 
  * ROTA B (Sem Tool Call):
  * 1. Envia resposta normal ao usuário
@@ -33,7 +33,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
 };
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY');
-const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-5-mini';
+const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini';
 serve(async (req)=>{
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
@@ -43,7 +43,7 @@ serve(async (req)=>{
   const body = await req.json().catch(()=>({}));
   const mensagem_id = body.mensagem_id;
   try {
-    console.log('[Orquestrador v11.0.0] 🚀 Iniciando');
+    console.log('[Orquestrador v11.0.0] 🚀 Sistema Dinâmico de Ferramentas');
     if (!mensagem_id) {
       throw new Error("O 'mensagem_id' é obrigatório.");
     }
@@ -51,21 +51,20 @@ serve(async (req)=>{
     // ============================================
     // 1. BUSCAR MENSAGEM
     // ============================================
-    console.log('[Orquestrador] 📨 Buscando mensagem:', mensagem_id);
+    console.log('[Orquestrador] 1. Buscando mensagem:', mensagem_id);
     const { data: mensagemData, error: msgError } = await supabase.from('mensagens_temporarias').select('aluno_id, mensagem').eq('id', mensagem_id).single();
     if (msgError) {
       throw new Error(`Mensagem não encontrada: ${msgError.message}`);
     }
     const { aluno_id, mensagem: perguntaUsuario } = mensagemData;
-    console.log('[Orquestrador] ✅ Mensagem encontrada');
-    console.log('[Orquestrador] 👤 Aluno ID:', aluno_id);
-    console.log('[Orquestrador] 💬 Pergunta:', perguntaUsuario.substring(0, 50));
+    console.log('[Orquestrador] ✅ Aluno ID:', aluno_id);
+    console.log('[Orquestrador] ✅ Mensagem:', perguntaUsuario.substring(0, 50) + '...');
     // ============================================
     // 2. BUSCAR PROMPT DINÂMICO + CONVERSATION_ID
     // ============================================
-    console.log('[Orquestrador] 📋 Buscando prompt dinâmico...');
-    const { data: promptData } = await supabase.from('dynamic_prompts').select('id, prompt_final, conversation_id').eq('aluno_id', aluno_id).single();
-    if (!promptData) {
+    console.log('[Orquestrador] 2. Buscando prompt dinâmico...');
+    const { data: promptData, error: promptError } = await supabase.from('dynamic_prompts').select('id, prompt_final, conversation_id').eq('aluno_id', aluno_id).single();
+    if (promptError || !promptData) {
       throw new Error('Dynamic prompt não encontrado');
     }
     let { prompt_final, conversation_id } = promptData;
@@ -73,13 +72,13 @@ serve(async (req)=>{
     if (!prompt_final) {
       throw new Error('prompt_final está vazio');
     }
-    console.log('[Orquestrador] ✅ Prompt carregado:', prompt_final.length, 'chars');
-    console.log('[Orquestrador] 📞 Conversation ID:', conversation_id || 'NULL (criar novo)');
+    console.log('[Orquestrador] ✅ Prompt:', prompt_final.length, 'chars');
+    console.log('[Orquestrador] ✅ Conversation ID:', conversation_id || 'NULL (criar novo)');
     // ============================================
     // 3. CRIAR CONVERSATION SE NÃO EXISTIR
     // ============================================
     if (!conversation_id) {
-      console.log('[Orquestrador] 📝 Criando nova conversation...');
+      console.log('[Orquestrador] 3. Criando nova conversation...');
       const createConvResponse = await fetch('https://api.openai.com/v1/conversations', {
         method: 'POST',
         headers: {
@@ -100,54 +99,31 @@ serve(async (req)=>{
       const convData = await createConvResponse.json();
       conversation_id = convData.id;
       console.log('[Orquestrador] ✅ Conversation criada:', conversation_id);
-      // Salvar no banco
       await supabase.from('dynamic_prompts').update({
         conversation_id: conversation_id
       }).eq('id', promptId);
-      console.log('[Orquestrador] ✅ Conversation ID salvo no banco');
     }
     // ============================================
     // 4. DEFINIR TOOLS (DINAMICAMENTE)
     // ============================================
-    // Esta lógica agora busca as ferramentas dinamicamente
-    // da tabela 'funcoes_ia' no banco de dados.
-    let tools = []; // Inicializa a lista de ferramentas como vazia
-    try {
-      console.log('[Orquestrador] 4. Buscando ferramentas (funções) ativas do banco de dados...');
-      // 1. Faz a consulta ao banco de dados
-      const { data: funcoesData, error: funcoesError } = await supabase.from('funcoes_ia').select('definicao_openai') // Pega SÓ a coluna com o JSON da OpenAI
-      .eq('is_active', true); // Filtra apenas pelas funções ativas
-      if (funcoesError) {
-        // Se a consulta falhar, registra o erro e lança
-        console.error('🔥 Erro crítico ao buscar funções da IA:', funcoesError.message);
-        throw new Error(`Falha ao carregar ferramentas da IA: ${funcoesError.message}`);
-      }
-      // 2. Processa os resultados
-      if (!funcoesData || funcoesData.length === 0) {
-        // Se não houver ferramentas, apenas avisa no log.
-        // 'tools' continuará sendo um array vazio [].
-        console.warn('⚠️ Nenhuma função/ferramenta da IA está ativa no banco de dados.');
-      } else {
-        // 3. Extrai as definições
-        tools = funcoesData.map((item)=>item.definicao_openai);
-        // Log de sucesso
-        // =============================================================
-        // <<-- ESTA É A LINHA CORRIGIDA -->>
-        const nomesDasTools = tools.map((t)=>t.name).join(', ');
-        // =============================================================
-        console.log(`[Orquestrador] ✅ ${tools.length} ferramentas carregadas com sucesso: [${nomesDasTools}]`);
-      }
-    } catch (error) {
-      // Captura qualquer erro no processo e o relança para parar a execução
-      console.error('🔥 Erro fatal durante a inicialização das tools:', error.message);
-      throw error;
+    console.log('[Orquestrador] 4. Buscando ferramentas ativas do banco...');
+    let tools = [];
+    const { data: funcoesData, error: funcoesError } = await supabase.from('funcoes_ia').select('definicao_openai').eq('is_active', true);
+    if (funcoesError) {
+      console.error('[Orquestrador] 🔥 Erro ao buscar funções:', funcoesError.message);
+      throw new Error(`Falha ao carregar ferramentas: ${funcoesError.message}`);
     }
-    // Ao final deste bloco, a variável 'tools' estará pronta (vazia ou preenchida)
-    // para ser usada na chamada da API da OpenAI mais abaixo no seu código.
+    if (!funcoesData || funcoesData.length === 0) {
+      console.warn('[Orquestrador] ⚠️ Nenhuma função ativa no banco');
+    } else {
+      tools = funcoesData.map((item)=>item.definicao_openai);
+      const nomesDasTools = tools.map((t)=>t.name).join(', ');
+      console.log(`[Orquestrador] ✅ ${tools.length} ferramentas carregadas: [${nomesDasTools}]`);
+    }
     // ============================================
     // 5. ENVIAR MENSAGEM PARA OPENAI
     // ============================================
-    console.log('[Orquestrador] 📤 Enviando mensagem para OpenAI...');
+    console.log('[Orquestrador] 5. Enviando mensagem para OpenAI...');
     const payload = {
       model: OPENAI_MODEL,
       conversation: conversation_id,
@@ -169,8 +145,7 @@ serve(async (req)=>{
       throw new Error(`Erro OpenAI: ${errorBody}`);
     }
     const responseData = await openaiResponse.json();
-    console.log('[Orquestrador] ✅ Resposta recebida');
-    console.log('[Orquestrador] 🆔 Response ID:', responseData.id);
+    console.log('[Orquestrador] ✅ Response ID:', responseData.id);
     console.log('[Orquestrador] 📊 Input tokens:', responseData.usage?.input_tokens);
     console.log('[Orquestrador] 📊 Cached tokens:', responseData.usage?.input_tokens_details?.cached_tokens ?? 0);
     console.log('[Orquestrador] 📊 Output tokens:', responseData.usage?.output_tokens);
@@ -182,7 +157,7 @@ serve(async (req)=>{
       if (item.type === 'function_call' || item.type === 'tool_call') {
         toolCallItem = item;
         console.log('[Orquestrador] 🔧 Tool detectada:', item.name);
-        console.log('[Orquestrador] 🆔 Tool ID:', item.id);
+        console.log('[Orquestrador] 🆔 Call ID:', item.call_id);
         break;
       }
     }
@@ -192,102 +167,55 @@ serve(async (req)=>{
     if (toolCallItem) {
       console.log('[Orquestrador] 🔴 ROTA A: Processando tool call');
       try {
+        // Parse dos argumentos
         const toolArgs = typeof toolCallItem.arguments === 'string' ? JSON.parse(toolCallItem.arguments) : toolCallItem.arguments;
-        console.log('[Orquestrador] 📥 Argumentos da tool:', toolArgs);
-        // 🔍 CORREÇÃO: Usar call_id em vez de id
-        const tool_call_id = toolCallItem.call_id;
-        console.log('[Orquestrador] 🔍 DADOS PARA ENVIAR À FUNÇÃO:');
-        console.log('[Orquestrador] - conversation_id:', conversation_id);
-        console.log('[Orquestrador] - tool_call_id:', tool_call_id);
-        console.log('[Orquestrador] - aluno_id:', aluno_id);
+        console.log('[Orquestrador] 📥 Argumentos:', toolArgs);
         // ============================================
-        // SWITCH: EXECUTAR FUNÇÃO BACKEND
+        // BUSCAR EDGE FUNCTION NO BANCO
         // ============================================
-        switch(toolCallItem.name){
-          // ==========================================
-          // CASE 1: IDENTIFICAR VARIAÇÃO DE CARGA
-          // ==========================================
-          case 'identificar_variacao_carga':
-            {
-              const { id_exercicio, variacao_de_carga, nome_exercicio } = toolArgs;
-              console.log('[Orquestrador] 💪 Acionando propor-atualizacao-carga...');
-              const { error: edgeError } = await supabase.functions.invoke('propor-atualizacao-carga', {
-                body: {
-                  exercicio_id: id_exercicio,
-                  variacao_kg: variacao_de_carga,
-                  conversation_id: conversation_id,
-                  tool_call_id: tool_call_id
-                }
-              });
-              if (edgeError) {
-                console.error('[Orquestrador] ❌ Erro ao invocar propor-atualizacao-carga:', edgeError);
-                throw edgeError;
-              }
-              console.log('[Orquestrador] ✅ Proposta de carga enviada');
-              console.log('[Orquestrador] ⏸️ ENCERRANDO orquestrador (bloqueio ativo)');
-              return new Response(JSON.stringify({
-                success: true,
-                rota: 'A',
-                tool: 'identificar_variacao_carga',
-                awaiting_confirmation: true,
-                message: 'Aguardando confirmação do usuário'
-              }), {
-                headers: {
-                  ...corsHeaders,
-                  'Content-Type': 'application/json'
-                },
-                status: 200
-              });
-            }
-          // ==========================================
-          // CASE 2: REGISTRAR CONSUMO
-          // ==========================================
-          case 'registrar_consumo':
-            {
-              const { refeicao, calorias, tipo, carboidratos, proteinas, gorduras, liquidos } = toolArgs;
-              console.log('[Orquestrador] 🍽️ Acionando propor-registro-refeicao...');
-              const { error: edgeError } = await supabase.functions.invoke('propor-registro-refeicao', {
-                body: {
-                  aluno_id: aluno_id,
-                  refeicao: refeicao,
-                  tipo: tipo,
-                  calorias: calorias,
-                  proteinas: proteinas,
-                  carboidratos: carboidratos,
-                  gorduras: gorduras,
-                  liquidos_ml: typeof liquidos === 'number' ? liquidos * 1000 : liquidos,
-                  conversation_id: conversation_id,
-                  tool_call_id: tool_call_id
-                }
-              });
-              if (edgeError) {
-                console.error('[Orquestrador] ❌ Erro ao invocar propor-registro-refeicao:', edgeError);
-                throw edgeError;
-              }
-              console.log('[Orquestrador] ✅ Proposta de refeição enviada');
-              console.log('[Orquestrador] ⏸️ ENCERRANDO orquestrador (bloqueio ativo)');
-              return new Response(JSON.stringify({
-                success: true,
-                rota: 'A',
-                tool: 'registrar_consumo',
-                awaiting_confirmation: true,
-                message: 'Aguardando confirmação do usuário'
-              }), {
-                headers: {
-                  ...corsHeaders,
-                  'Content-Type': 'application/json'
-                },
-                status: 200
-              });
-            }
-          // ==========================================
-          // DEFAULT: FUNÇÃO NÃO IMPLEMENTADA
-          // ==========================================
-          default:
-            {
-              throw new Error(`Função não implementada: ${toolCallItem.name}`);
-            }
+        console.log('[Orquestrador] 🔍 Buscando edge function para:', toolCallItem.name);
+        const { data: funcaoData, error: funcaoError } = await supabase.from('funcoes_ia').select('edge_function, nome_funcao').eq('nome_funcao', toolCallItem.name).eq('is_active', true).single();
+        if (funcaoError) {
+          console.error('[Orquestrador] ❌ Erro SQL:', funcaoError);
+          throw new Error(`Erro ao buscar função: ${funcaoError.message}`);
         }
+        if (!funcaoData) {
+          console.error('[Orquestrador] ❌ Nenhum dado retornado para:', toolCallItem.name);
+          throw new Error(`Função ${toolCallItem.name} não encontrada no banco`);
+        }
+        const edgeFunctionName = funcaoData.edge_function;
+        console.log('[Orquestrador] ✅ Edge Function:', edgeFunctionName);
+        // ============================================
+        // INVOCAR EDGE FUNCTION (FORMATO PADRONIZADO)
+        // ============================================
+        console.log('[Orquestrador] 🚀 Invocando', edgeFunctionName);
+        const { error: edgeError } = await supabase.functions.invoke(edgeFunctionName, {
+          body: {
+            aluno_id: aluno_id,
+            conversation_id: conversation_id,
+            tool_call_id: toolCallItem.call_id,
+            argumentos: toolArgs
+          }
+        });
+        if (edgeError) {
+          console.error('[Orquestrador] ❌ Erro na Edge Function:', edgeError);
+          throw edgeError;
+        }
+        console.log('[Orquestrador] ✅ Edge function executada com sucesso');
+        console.log('[Orquestrador] ⏸️ ENCERRANDO (aguardando confirmação)');
+        return new Response(JSON.stringify({
+          success: true,
+          rota: 'A',
+          tool: toolCallItem.name,
+          awaiting_confirmation: true,
+          message: 'Aguardando confirmação do usuário'
+        }), {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json'
+          },
+          status: 200
+        });
       } catch (toolError) {
         console.error('[Orquestrador] ❌ Erro ao processar tool:', toolError.message);
         throw toolError;
@@ -296,8 +224,7 @@ serve(async (req)=>{
     // ============================================
     // ROTA B: SEM TOOL CALL (RESPOSTA NORMAL)
     // ============================================
-    console.log('[Orquestrador] 🟢 ROTA B: Resposta normal (sem tool call)');
-    // Extrair resposta do output
+    console.log('[Orquestrador] 🟢 ROTA B: Resposta normal');
     let respostaIA = '';
     for (const item of responseData.output || []){
       if (item.type === 'message' && item.role === 'assistant') {
@@ -316,17 +243,14 @@ serve(async (req)=>{
     await supabase.from('mensagens_temporarias').update({
       resposta: respostaIA
     }).eq('id', mensagem_id);
-    console.log('[Orquestrador] ✅ Resposta salva no banco');
     // Enviar resposta ao usuário
-    console.log('[Orquestrador] 📱 Enviando resposta ao usuário...');
     await supabase.functions.invoke('enviar_menssagem_whatsapp', {
       body: {
         aluno_id: aluno_id,
         mensagem: respostaIA
       }
     });
-    console.log('[Orquestrador] ✅ Resposta enviada ao WhatsApp');
-    // Registrar tokens (assíncrono, não aguarda)
+    // Registrar tokens (assíncrono)
     supabase.functions.invoke('registrar-tokens', {
       body: {
         aluno_id: aluno_id,
@@ -340,7 +264,7 @@ serve(async (req)=>{
         api_response_body: responseData
       }
     }).catch((err)=>{
-      console.error('[Orquestrador] ⚠️ Erro ao registrar tokens (não crítico):', err);
+      console.error('[Orquestrador] ⚠️ Erro ao registrar tokens:', err);
     });
     console.log('[Orquestrador] ✅ CONCLUÍDO (ROTA B)');
     return new Response(JSON.stringify({
@@ -361,9 +285,12 @@ serve(async (req)=>{
     // Tentar salvar erro na mensagem
     if (mensagem_id) {
       const supabaseAdmin = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
-      await supabaseAdmin.from('mensagens_temporarias').update({
+      const { error: updateError } = await supabaseAdmin.from('mensagens_temporarias').update({
         resposta: `ERRO: ${error.message}`
-      }).eq('id', mensagem_id).catch(()=>{});
+      }).eq('id', mensagem_id);
+      if (updateError) {
+        console.error('[Orquestrador] Erro ao salvar mensagem de erro:', updateError);
+      }
     }
     return new Response(JSON.stringify({
       error: error.message,
