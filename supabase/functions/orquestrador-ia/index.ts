@@ -107,78 +107,43 @@ serve(async (req)=>{
       console.log('[Orquestrador] ✅ Conversation ID salvo no banco');
     }
     // ============================================
-    // 4. DEFINIR TOOLS
+    // 4. DEFINIR TOOLS (DINAMICAMENTE)
     // ============================================
-    const tools = [
-      {
-        type: 'function',
-        name: 'identificar_variacao_carga',
-        description: 'Calcula a variação de carga proposta para um exercício e retorna o identificador, a variação de carga, e o nome do exercício.',
-        strict: true,
-        parameters: {
-          type: 'object',
-          required: [
-            'id_exercicio',
-            'variacao_de_carga',
-            'nome_exercicio'
-          ],
-          properties: {
-            id_exercicio: {
-              type: 'string'
-            },
-            variacao_de_carga: {
-              type: 'number'
-            },
-            nome_exercicio: {
-              type: 'string'
-            }
-          },
-          additionalProperties: false
-        }
-      },
-      {
-        type: 'function',
-        name: 'registrar_consumo',
-        description: 'Extrai informações de macronutrientes, valor calórico, tipo de refeição e consumo de líquidos de uma refeição informada pelo aluno.',
-        strict: true,
-        parameters: {
-          type: 'object',
-          required: [
-            'refeicao',
-            'calorias',
-            'tipo',
-            'carboidratos',
-            'proteinas',
-            'gorduras',
-            'liquidos'
-          ],
-          properties: {
-            refeicao: {
-              type: 'string'
-            },
-            calorias: {
-              type: 'number'
-            },
-            tipo: {
-              type: 'string'
-            },
-            carboidratos: {
-              type: 'number'
-            },
-            proteinas: {
-              type: 'number'
-            },
-            gorduras: {
-              type: 'number'
-            },
-            liquidos: {
-              type: 'number'
-            }
-          },
-          additionalProperties: false
-        }
+    // Esta lógica agora busca as ferramentas dinamicamente
+    // da tabela 'funcoes_ia' no banco de dados.
+    let tools = []; // Inicializa a lista de ferramentas como vazia
+    try {
+      console.log('[Orquestrador] 4. Buscando ferramentas (funções) ativas do banco de dados...');
+      // 1. Faz a consulta ao banco de dados
+      const { data: funcoesData, error: funcoesError } = await supabase.from('funcoes_ia').select('definicao_openai') // Pega SÓ a coluna com o JSON da OpenAI
+      .eq('is_active', true); // Filtra apenas pelas funções ativas
+      if (funcoesError) {
+        // Se a consulta falhar, registra o erro e lança
+        console.error('🔥 Erro crítico ao buscar funções da IA:', funcoesError.message);
+        throw new Error(`Falha ao carregar ferramentas da IA: ${funcoesError.message}`);
       }
-    ];
+      // 2. Processa os resultados
+      if (!funcoesData || funcoesData.length === 0) {
+        // Se não houver ferramentas, apenas avisa no log.
+        // 'tools' continuará sendo um array vazio [].
+        console.warn('⚠️ Nenhuma função/ferramenta da IA está ativa no banco de dados.');
+      } else {
+        // 3. Extrai as definições
+        tools = funcoesData.map((item)=>item.definicao_openai);
+        // Log de sucesso
+        // =============================================================
+        // <<-- ESTA É A LINHA CORRIGIDA -->>
+        const nomesDasTools = tools.map((t)=>t.name).join(', ');
+        // =============================================================
+        console.log(`[Orquestrador] ✅ ${tools.length} ferramentas carregadas com sucesso: [${nomesDasTools}]`);
+      }
+    } catch (error) {
+      // Captura qualquer erro no processo e o relança para parar a execução
+      console.error('🔥 Erro fatal durante a inicialização das tools:', error.message);
+      throw error;
+    }
+    // Ao final deste bloco, a variável 'tools' estará pronta (vazia ou preenchida)
+    // para ser usada na chamada da API da OpenAI mais abaixo no seu código.
     // ============================================
     // 5. ENVIAR MENSAGEM PARA OPENAI
     // ============================================
@@ -229,10 +194,11 @@ serve(async (req)=>{
       try {
         const toolArgs = typeof toolCallItem.arguments === 'string' ? JSON.parse(toolCallItem.arguments) : toolCallItem.arguments;
         console.log('[Orquestrador] 📥 Argumentos da tool:', toolArgs);
-        // 🔍 LOG CRÍTICO: Verificar se temos os IDs
+        // 🔍 CORREÇÃO: Usar call_id em vez de id
+        const tool_call_id = toolCallItem.call_id;
         console.log('[Orquestrador] 🔍 DADOS PARA ENVIAR À FUNÇÃO:');
         console.log('[Orquestrador] - conversation_id:', conversation_id);
-        console.log('[Orquestrador] - tool_call_id:', toolCallItem.id);
+        console.log('[Orquestrador] - tool_call_id:', tool_call_id);
         console.log('[Orquestrador] - aluno_id:', aluno_id);
         // ============================================
         // SWITCH: EXECUTAR FUNÇÃO BACKEND
@@ -250,7 +216,7 @@ serve(async (req)=>{
                   exercicio_id: id_exercicio,
                   variacao_kg: variacao_de_carga,
                   conversation_id: conversation_id,
-                  tool_call_id: toolCallItem.id
+                  tool_call_id: tool_call_id
                 }
               });
               if (edgeError) {
@@ -259,7 +225,6 @@ serve(async (req)=>{
               }
               console.log('[Orquestrador] ✅ Proposta de carga enviada');
               console.log('[Orquestrador] ⏸️ ENCERRANDO orquestrador (bloqueio ativo)');
-              // ENCERRAR AQUI - NÃO FAZER MAIS NADA
               return new Response(JSON.stringify({
                 success: true,
                 rota: 'A',
@@ -292,7 +257,7 @@ serve(async (req)=>{
                   gorduras: gorduras,
                   liquidos_ml: typeof liquidos === 'number' ? liquidos * 1000 : liquidos,
                   conversation_id: conversation_id,
-                  tool_call_id: toolCallItem.id
+                  tool_call_id: tool_call_id
                 }
               });
               if (edgeError) {
@@ -301,7 +266,6 @@ serve(async (req)=>{
               }
               console.log('[Orquestrador] ✅ Proposta de refeição enviada');
               console.log('[Orquestrador] ⏸️ ENCERRANDO orquestrador (bloqueio ativo)');
-              // ENCERRAR AQUI - NÃO FAZER MAIS NADA
               return new Response(JSON.stringify({
                 success: true,
                 rota: 'A',

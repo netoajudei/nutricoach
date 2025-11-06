@@ -124,6 +124,9 @@ serve(async (req)=>{
       // ========================================
       // MENSAGEM DE TEXTO
       // ========================================
+      // ========================================
+      // CASE 1: MENSAGEM DE TEXTO
+      // ========================================
       case 'conversation':
       case 'extendedTextMessage':
         {
@@ -135,6 +138,25 @@ serve(async (req)=>{
             });
           }
           const timestampMs = (data.messageTimestamp.low || data.messageTimestamp) * 1000;
+          const dataHora = new Date(timestampMs);
+          // Formatar data e hora
+          const diasSemana = [
+            'domingo',
+            'segunda',
+            'terça',
+            'quarta',
+            'quinta',
+            'sexta',
+            'sábado'
+          ];
+          const diaSemana = diasSemana[dataHora.getDay()];
+          const dia = String(dataHora.getDate()).padStart(2, '0');
+          const mes = String(dataHora.getMonth() + 1).padStart(2, '0');
+          const hora = String(dataHora.getHours()).padStart(2, '0');
+          const minuto = String(dataHora.getMinutes()).padStart(2, '0');
+          const dataFormatada = `${diaSemana} ${dia}/${mes} ${hora}:${minuto}`;
+          // Adicionar data na mensagem
+          mensagemUsuario = `<data>${dataFormatada}</data> ${mensagemUsuario}`;
           await supabase.from('mensagens_temporarias').insert({
             aluno_id: aluno.id,
             whatsapp: whatsappNumber,
@@ -284,47 +306,49 @@ serve(async (req)=>{
                   if (!exercicio_id || !nova_carga || !aluno_id) {
                     throw new Error('Dados incompletos');
                   }
-                  // 1️⃣ EXECUTAR RPC (já existente)
+                  // 1️⃣ EXECUTAR RPC (atualiza banco)
+                  console.log('[WEBHOOK-WAME] 💾 Atualizando carga no banco...');
                   const { data: rpcResult, error: rpcError } = await supabase.rpc('atualizar_carga_exercicio', {
                     p_exercicio_id: exercicio_id,
                     p_aluno_id: aluno_id,
                     p_nova_carga: nova_carga,
                     p_whatsapp: whatsappNumber
                   });
-                  if (rpcError) throw rpcError;
-                  console.log('[WEBHOOK-WAME] ✅ Carga atualizada');
-                  // 2️⃣ BUSCAR DADOS PARA FINALIZAÇÃO
-                  const { data: alunoData } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
-                  const { conversation_id, tool_call_id } = alunoData?.aguardando_confirmacao || {};
-                  // 3️⃣ FINALIZAR FUNCTION CALLING + LIMPAR BLOQUEIO
-                  if (conversation_id && tool_call_id) {
-                    console.log('[WEBHOOK-WAME] 🔄 Finalizando function calling...');
-                    // Chamar função que finaliza + envia resposta + limpa bloqueio
-                    await supabase.functions.invoke('finalizar-e-limpar', {
-                      body: {
-                        aluno_id: aluno_id,
-                        whatsapp: whatsappNumber,
-                        conversation_id: conversation_id,
-                        tool_call_id: tool_call_id,
-                        mensagem_sucesso: `✅ Carga atualizada com sucesso! ${rpcResult?.exercicio?.nome}: ${rpcResult?.exercicio?.carga_anterior}kg → ${rpcResult?.exercicio?.carga_nova}kg 💪`
-                      }
-                    });
-                    console.log('[WEBHOOK-WAME] ✅ Function calling finalizado e bloqueio limpo');
-                  } else {
-                    // Se não tem bloqueio, envia mensagem simples
-                    const exercicioData = rpcResult?.exercicio;
-                    const mensagem = `✅ Carga atualizada! ${exercicioData?.nome}: ${exercicioData?.carga_anterior}kg → ${exercicioData?.carga_nova}kg 💪`;
-                    fetch(`https://us.api-wa.me/${key}/message/text`, {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json'
-                      },
-                      body: JSON.stringify({
-                        to: whatsappNumber,
-                        text: mensagem
-                      })
-                    }).catch(console.error);
+                  if (rpcError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao atualizar carga:', rpcError);
+                    throw rpcError;
                   }
+                  console.log('[WEBHOOK-WAME] ✅ Carga atualizada no banco');
+                  // 2️⃣ BUSCAR DADOS PARA FINALIZAÇÃO
+                  console.log('[WEBHOOK-WAME] 🔍 Buscando dados de aguardando_confirmacao...');
+                  const { data: alunoData, error: alunoDataError } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
+                  if (alunoDataError || !alunoData) {
+                    throw new Error('Não foi possível buscar dados do aluno');
+                  }
+                  const { conversation_id, tool_call_id } = alunoData.aguardando_confirmacao || {};
+                  if (!conversation_id || !tool_call_id) {
+                    throw new Error('conversation_id ou tool_call_id não encontrados em aguardando_confirmacao');
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Conversation ID:', conversation_id);
+                  console.log('[WEBHOOK-WAME] ✅ Tool Call ID:', tool_call_id);
+                  // 3️⃣ FINALIZAR FUNCTION CALLING + LIMPAR BLOQUEIO
+                  console.log('[WEBHOOK-WAME] 🚀 Acionando finalizar-e-limpar...');
+                  const exercicioData = rpcResult?.exercicio;
+                  const mensagemSucesso = `✅ Carga atualizada com sucesso! ${exercicioData?.nome}: ${exercicioData?.carga_anterior}kg → ${exercicioData?.carga_nova}kg 💪`;
+                  const { error: finalizarError } = await supabase.functions.invoke('finalizar-e-limpar', {
+                    body: {
+                      aluno_id: aluno_id,
+                      whatsapp: whatsappNumber,
+                      conversation_id: conversation_id,
+                      tool_call_id: tool_call_id,
+                      mensagem_sucesso: mensagemSucesso
+                    }
+                  });
+                  if (finalizarError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao acionar finalizar-e-limpar:', finalizarError);
+                    throw new Error(`Erro ao finalizar: ${finalizarError.message}`);
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Function calling finalizado e bloqueio limpo');
                   break;
                 }
               // ==========================================
@@ -337,66 +361,79 @@ serve(async (req)=>{
                   if (!registro_id || !aluno_id) {
                     throw new Error('Dados incompletos');
                   }
-                  // 1️⃣ EXECUTAR RPC (já existente)
+                  // 1️⃣ EXECUTAR RPC (atualiza banco)
+                  console.log('[WEBHOOK-WAME] 💾 Atualizando banco de dados...');
                   const { data: rpcResult, error: rpcError } = await supabase.rpc('processar_confirmacao_refeicao', {
                     p_registro_id: registro_id,
                     p_confirmar: true
                   });
-                  if (rpcError) throw rpcError;
-                  console.log('[WEBHOOK-WAME] ✅ Refeição confirmada');
+                  if (rpcError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao confirmar refeição:', rpcError);
+                    throw rpcError;
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Refeição confirmada no banco');
                   // 2️⃣ BUSCAR DADOS PARA FINALIZAÇÃO
-                  const { data: alunoData } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
-                  const { conversation_id, tool_call_id } = alunoData?.aguardando_confirmacao || {};
-                  // 3️⃣ FINALIZAR FUNCTION CALLING + LIMPAR BLOQUEIO
-                  if (conversation_id && tool_call_id) {
-                    console.log('[WEBHOOK-WAME] 🔄 Finalizando function calling...');
-                    await supabase.functions.invoke('finalizar-e-limpar', {
-                      body: {
-                        aluno_id: aluno_id,
-                        whatsapp: whatsappNumber,
-                        conversation_id: conversation_id,
-                        tool_call_id: tool_call_id,
-                        mensagem_sucesso: '✅ Refeição registrada com sucesso! Seus macros foram atualizados. Continue assim! 💪'
-                      }
-                    });
-                    console.log('[WEBHOOK-WAME] ✅ Function calling finalizado e bloqueio limpo');
-                  } else {
-                    // Se não tem bloqueio, envia mensagem simples
-                    fetch(`https://us.api-wa.me/${key}/message/text`, {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json'
-                      },
-                      body: JSON.stringify({
-                        to: whatsappNumber,
-                        text: '✅ Refeição registrada!'
-                      })
-                    }).catch(console.error);
-                  }
-                  break;
-                }
-              // ==========================================
-              // CANCELAR QUALQUER AÇÃO (GENÉRICO)
-              // ==========================================
-              case 'cancelar_update_carga':
-              case 'cancelar_registro_refeicao':
-                {
-                  console.log('[WEBHOOK-WAME] ❌ Cancelando ação');
-                  const { aluno_id } = buttonData;
-                  if (!aluno_id) {
-                    throw new Error('aluno_id ausente');
-                  }
-                  // Buscar dados necessários
+                  console.log('[WEBHOOK-WAME] 🔍 Buscando dados de aguardando_confirmacao...');
                   const { data: alunoData, error: alunoDataError } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
                   if (alunoDataError || !alunoData) {
                     throw new Error('Não foi possível buscar dados do aluno');
                   }
                   const { conversation_id, tool_call_id } = alunoData.aguardando_confirmacao || {};
                   if (!conversation_id || !tool_call_id) {
-                    throw new Error('conversation_id ou tool_call_id não encontrados');
+                    throw new Error('conversation_id ou tool_call_id não encontrados em aguardando_confirmacao');
                   }
+                  console.log('[WEBHOOK-WAME] ✅ Conversation ID:', conversation_id);
+                  console.log('[WEBHOOK-WAME] ✅ Tool Call ID:', tool_call_id);
+                  // 3️⃣ FINALIZAR FUNCTION CALLING + LIMPAR BLOQUEIO
+                  console.log('[WEBHOOK-WAME] 🚀 Acionando finalizar-e-limpar...');
+                  const { error: finalizarError } = await supabase.functions.invoke('finalizar-e-limpar', {
+                    body: {
+                      aluno_id: aluno_id,
+                      whatsapp: whatsappNumber,
+                      conversation_id: conversation_id,
+                      tool_call_id: tool_call_id,
+                      mensagem_sucesso: '✅ Refeição registrada com sucesso! Seus macros foram atualizados. Continue assim! 💪'
+                    }
+                  });
+                  if (finalizarError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao acionar finalizar-e-limpar:', finalizarError);
+                    throw new Error(`Erro ao finalizar: ${finalizarError.message}`);
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Function calling finalizado e bloqueio limpo');
+                  break;
+                }
+              // ==========================================
+              // CANCELAR REGISTRO DE REFEIÇÃO
+              // ==========================================
+              case 'cancelar_registro_refeicao':
+                {
+                  console.log('[WEBHOOK-WAME] ❌ Cancelando registro de refeição');
+                  const { registro_id, aluno_id } = buttonData;
+                  if (!registro_id || !aluno_id) {
+                    throw new Error('Dados incompletos: registro_id ou aluno_id ausente');
+                  }
+                  console.log('[WEBHOOK-WAME] 📋 Registro ID:', registro_id);
+                  console.log('[WEBHOOK-WAME] 👤 Aluno ID:', aluno_id);
+                  console.log('[WEBHOOK-WAME] 🗑️ Deletando refeição do banco...');
+                  const { error: deleteError } = await supabase.from('daily_consumption_history').delete().eq('id', registro_id).eq('confirmada', false);
+                  if (deleteError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao deletar refeição:', deleteError);
+                    throw new Error(`Erro ao deletar refeição: ${deleteError.message}`);
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Refeição deletada com sucesso');
+                  console.log('[WEBHOOK-WAME] 🔍 Buscando dados de aguardando_confirmacao...');
+                  const { data: alunoData, error: alunoDataError } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
+                  if (alunoDataError || !alunoData) {
+                    throw new Error('Não foi possível buscar dados do aluno');
+                  }
+                  const { conversation_id, tool_call_id } = alunoData.aguardando_confirmacao || {};
+                  if (!conversation_id || !tool_call_id) {
+                    throw new Error('conversation_id ou tool_call_id não encontrados em aguardando_confirmacao');
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Conversation ID:', conversation_id);
+                  console.log('[WEBHOOK-WAME] ✅ Tool Call ID:', tool_call_id);
                   console.log('[WEBHOOK-WAME] 🚀 Acionando cancelar-registro...');
-                  await supabase.functions.invoke('cancelar-registro', {
+                  const { error: cancelError } = await supabase.functions.invoke('cancelar-registro', {
                     body: {
                       aluno_id: aluno_id,
                       whatsapp: whatsappNumber,
@@ -404,7 +441,52 @@ serve(async (req)=>{
                       tool_call_id: tool_call_id
                     }
                   });
-                  console.log('[WEBHOOK-WAME] ✅ Cancelamento processado');
+                  if (cancelError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao acionar cancelar-registro:', cancelError);
+                    throw new Error(`Erro ao cancelar registro: ${cancelError.message}`);
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Cancelamento processado com sucesso');
+                  console.log('[WEBHOOK-WAME] 🔓 Bloqueio será limpo pela função cancelar-registro');
+                  break;
+                }
+              // ==========================================
+              // CANCELAR REGISTRO DE CARGA
+              // ==========================================
+              case 'cancelar_update_carga':
+                {
+                  console.log('[WEBHOOK-WAME] ❌ Cancelando atualização de carga');
+                  const { exercicio_id, aluno_id } = buttonData;
+                  if (!exercicio_id || !aluno_id) {
+                    throw new Error('Dados incompletos: exercicio_id ou aluno_id ausente');
+                  }
+                  console.log('[WEBHOOK-WAME] 📋 Exercício ID:', exercicio_id);
+                  console.log('[WEBHOOK-WAME] 👤 Aluno ID:', aluno_id);
+                  console.log('[WEBHOOK-WAME] 🔍 Buscando dados de aguardando_confirmacao...');
+                  const { data: alunoData, error: alunoDataError } = await supabase.from('alunos').select('aguardando_confirmacao').eq('id', aluno_id).single();
+                  if (alunoDataError || !alunoData) {
+                    throw new Error('Não foi possível buscar dados do aluno');
+                  }
+                  const { conversation_id, tool_call_id } = alunoData.aguardando_confirmacao || {};
+                  if (!conversation_id || !tool_call_id) {
+                    throw new Error('conversation_id ou tool_call_id não encontrados em aguardando_confirmacao');
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Conversation ID:', conversation_id);
+                  console.log('[WEBHOOK-WAME] ✅ Tool Call ID:', tool_call_id);
+                  console.log('[WEBHOOK-WAME] 🚀 Acionando cancelar-registro...');
+                  const { error: cancelError } = await supabase.functions.invoke('cancelar-registro', {
+                    body: {
+                      aluno_id: aluno_id,
+                      whatsapp: whatsappNumber,
+                      conversation_id: conversation_id,
+                      tool_call_id: tool_call_id
+                    }
+                  });
+                  if (cancelError) {
+                    console.error('[WEBHOOK-WAME] ❌ Erro ao acionar cancelar-registro:', cancelError);
+                    throw new Error(`Erro ao cancelar atualização: ${cancelError.message}`);
+                  }
+                  console.log('[WEBHOOK-WAME] ✅ Cancelamento processado com sucesso');
+                  console.log('[WEBHOOK-WAME] 🔓 Bloqueio será limpo pela função cancelar-registro');
                   break;
                 }
               // ==========================================
