@@ -1,29 +1,25 @@
 /**
- * @name propor-registro-refeicao
- * @version 1.2.0
+ * @name propor-conclusao-treino
+ * @version 1.0.0
  * @author NutriCoach AI Development Team
- * @date 2025-11-06
- *
- * @changelog
- * - v1.2.0 (Confirmação):
- * - Lógica de inserir em `daily_consumption_history` NÃO existe aqui.
- * - A função apenas cria o estado em `botoes_ativos` e envia a mensagem.
- * - v1.1.0:
- * - Corrigido o erro "[object Object]" is not valid JSON.
- * - 'argumentos' já é um objeto e não precisa de JSON.parse().
+ * @date 2025-11-07
  *
  * @description
- * 1. Recebe o tool_call da IA (orquestrador).
+ * 1. Recebe o tool_call da IA (orquestrador) com os dados do treino concluído.
  * 2. Busca o WhatsApp do aluno.
- * 3. Cria (UPSERT) um registro na tabela `botoes_ativos` com os argumentos da refeição.
- * 4. Define a `edge_function` de resposta como 'finalizar-registro-refeicao'.
- * 5. Envia o botão de confirmação (Sim/Não) para o aluno via WAME.
+ * 3. Cria (UPSERT) um registro na tabela `botoes_ativos` com todos os argumentos.
+ * 4. Define a `edge_function` de resposta como 'registrar-conclusao-treino'.
+ * 5. Formata uma mensagem de confirmação para o usuário.
+ * 6. Envia o botão de confirmação (Sim/Não) para o aluno via WAME.
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
 };
+// ========================================
+// FUNÇÃO PRINCIPAL
+// ========================================
 serve(async (req)=>{
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
@@ -35,51 +31,40 @@ serve(async (req)=>{
     // 1. Receber payload do Orquestrador
     const body = await req.json();
     const { aluno_id, conversation_id, tool_call_id, argumentos } = body;
-    console.log(`[propor-registro-refeicao] 🚀 Iniciando para aluno: ${aluno_id}`);
-    console.log(`[propor-registro-refeicao] 🤖 Tool Call ID: ${tool_call_id}`);
+    console.log(`[propor-conclusao-treino] 🚀 Iniciando para aluno: ${aluno_id}`);
+    console.log(`[propor-conclusao-treino] 🤖 Tool Call ID: ${tool_call_id}`);
     if (!aluno_id || !conversation_id || !tool_call_id || !argumentos) {
       throw new Error('Payload incompleto. Faltando aluno_id, conversation_id, tool_call_id ou argumentos.');
     }
     // 2. Argumentos já vêm como Objeto JSON
-    const args = argumentos; // <<-- JSON.parse() removido
-    const { refeicao, tipo, calorias, proteinas, carboidratos, gorduras, liquidos_ml } = args;
-    if (!refeicao || !tipo || calorias === undefined) {
-      throw new Error('Argumentos da IA incompletos. Faltando "refeicao", "tipo" ou "calorias".');
+    const args = argumentos;
+    const { nome_treino, duracao, observacoes } = args;
+    if (!nome_treino || duracao === undefined || observacoes === undefined) {
+      throw new Error('Argumentos da IA incompletos. Faltando "nome_treino", "duracao" ou "observacoes".');
     }
     // 3. Buscar dados do aluno (WhatsApp)
-    console.log(`[propor-registro-refeicao] 🔍 Buscando WhatsApp do aluno...`);
+    console.log(`[propor-conclusao-treino] 🔍 Buscando WhatsApp do aluno...`);
     const { data: alunoData, error: alunoError } = await supabase.from('alunos').select('whatsapp').eq('id', aluno_id).single();
     if (alunoError) throw alunoError;
     if (!alunoData) throw new Error(`Aluno ${aluno_id} não encontrado.`);
     const whatsappNumber = alunoData.whatsapp;
-    console.log(`[propor-registro-refeicao] ✅ WhatsApp: ${whatsappNumber}`);
-    // 4. Adicionar 'horario' aos argumentos
-    const horario_atual = new Date().toLocaleString('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-    const finalArgs = {
-      ...args,
-      horario: horario_atual
-    };
-    // 5. Criar (UPSERT) o registro em `botoes_ativos`
-    console.log(`[propor-registro-refeicao] 💾 Criando registro em botoes_ativos...`);
+    console.log(`[propor-conclusao-treino] ✅ WhatsApp: ${whatsappNumber}`);
+    // 4. Criar (UPSERT) o registro em `botoes_ativos`
+    console.log(`[propor-conclusao-treino] 💾 Criando registro em botoes_ativos...`);
     const { data: botaoData, error: botaoError } = await supabase.from('botoes_ativos').upsert({
       aluno_id: aluno_id,
       conversation_id: conversation_id,
       tool_call_id: tool_call_id,
-      tipo_acao: 'registro_refeicao',
-      argumentos: finalArgs,
-      edge_function: 'finalizar-registro-refeicao' // A função que será chamada na confirmação
+      tipo_acao: 'conclusao_treino',
+      argumentos: args,
+      edge_function: 'registrar-conclusao-treino' // A função que será chamada na confirmação
     }, {
       onConflict: 'aluno_id'
     }).select('id').single();
     if (botaoError) throw botaoError;
     const botao_id = botaoData.id;
-    console.log(`[propor-registro-refeicao] ✅ Registro de botão criado/atualizado: ${botao_id}`);
-    // 6. Preparar payloads de botão (padrão centralizado)
+    console.log(`[propor-conclusao-treino] ✅ Registro de botão criado/atualizado: ${botao_id}`);
+    // 5. Preparar payloads de botão (padrão centralizado)
     const payloadSim = JSON.stringify({
       action: 'resposta_botao',
       botao_id: botao_id,
@@ -90,29 +75,22 @@ serve(async (req)=>{
       botao_id: botao_id,
       confirmado: false
     });
-    // 7. Buscar API Key da WAME
-    console.log(`[propor-registro-refeicao] 🔑 Buscando API Key...`);
+    // 6. Buscar API Key da WAME
+    console.log(`[propor-conclusao-treino] 🔑 Buscando API Key...`);
     const { data: configData, error: configError } = await supabase.from('config_sistema').select('valor').eq('chave', 'wame_api_key').single();
     if (configError) throw configError;
     const api_key = configData.valor;
-    // 8. Construir a mensagem
-    const mensagemTexto = `🍽️ Confirmar Refeição - ${tipo.toUpperCase()}
-
-📋 O QUE VOCÊ COMEU:
-${refeicao}
-
-📊 RESUMO NUTRICIONAL:
-• Calorias: ${calorias || 0} kcal
-• Proteínas: ${proteinas || 0}g
-• Carboidratos: ${carboidratos || 0}g
-• Gorduras: ${gorduras || 0}g
-• Líquidos: ${liquidos_ml || 0}ml
+    // 7. Construir a mensagem
+    const mensagemTexto = `🏋️ Confirmar Conclusão do Treino\n
+• Treino: *${nome_treino}*
+• Duração: *${duracao} minutos*
+• Observações: *"${observacoes}"*
 
 Confirmar este registro?`;
     const requestBody = {
       to: whatsappNumber,
       header: {
-        title: '🍽️ Registro de Refeição'
+        title: '🏋️ Registro de Treino'
       },
       text: mensagemTexto,
       footer: 'Escolha uma opção:',
@@ -125,12 +103,12 @@ Confirmar este registro?`;
         {
           type: 'quick_reply',
           id: payloadNao,
-          text: 'Não, alterar'
+          text: 'Não, cancelar'
         }
       ]
     };
-    // 9. Enviar o botão para o WAME
-    console.log(`[propor-registro-refeicao] 📤 Enviando botão para WAME...`);
+    // 8. Enviar o botão para o WAME
+    console.log(`[propor-conclusao-treino] 📤 Enviando botão para WAME...`);
     const wameResponse = await fetch(`https://us.api-wa.me/${api_key}/message/button_reply`, {
       method: 'POST',
       headers: {
@@ -142,11 +120,11 @@ Confirmar este registro?`;
       const errorBody = await wameResponse.text();
       throw new Error(`Erro ao enviar mensagem WAME: ${wameResponse.status} - ${errorBody}`);
     }
-    console.log(`[propor-registro-refeicao] ✅ Proposta de refeição enviada com sucesso.`);
-    // 10. Retornar OK para o Orquestrador
+    console.log(`[propor-conclusao-treino] ✅ Proposta de conclusão de treino enviada com sucesso.`);
+    // 9. Retornar OK para o Orquestrador
     return new Response(JSON.stringify({
       success: true,
-      message: "Proposta de refeição enviada ao usuário."
+      message: "Proposta de conclusão de treino enviada ao usuário."
     }), {
       status: 200,
       headers: {
@@ -155,8 +133,8 @@ Confirmar este registro?`;
       }
     });
   } catch (error) {
-    console.error(`[propor-registro-refeicao] ❌ ERRO:`, error.message);
-    console.error(`[propor-registro-refeicao] Stack:`, error.stack);
+    console.error(`[propor-conclusao-treino] ❌ ERRO:`, error.message);
+    console.error(`[propor-conclusao-treino] Stack:`, error.stack);
     return new Response(JSON.stringify({
       error: error.message
     }), {

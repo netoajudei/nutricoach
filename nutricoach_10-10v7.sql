@@ -1,5 +1,5 @@
 
-\restrict PIU73Mao5btS6pCZvBMdi3NB13zHY7UOdq0igXL2bxJGQJTTDIEfRsxed50dEvH
+\restrict o1kBH3Sft6cIBdsJSYgnDbPUzWILykPW5w5IABCqjSycXsoWLsz3HdVliCezjGd
 
 
 SET statement_timeout = 0;
@@ -435,24 +435,21 @@ COMMENT ON FUNCTION "public"."atualizar_peso_aluno"("p_aluno_id" "uuid", "p_novo
 CREATE OR REPLACE FUNCTION "public"."atualizar_prompt_final_para_aluno"("p_aluno_id" "uuid") RETURNS "text"
     LANGUAGE "plpgsql"
     AS $$
-/**
- * @name atualizar_prompt_final_para_aluno
- * @version 1.0.0
- * @description
- * Força a reconstrução do prompt de sistema completo para um aluno específico.
- * Esta função lê todas as colunas de contexto da tabela `dynamic_prompts`
- * e as concatena na coluna `prompt_final`.
- *
- * @param {UUID} p_aluno_id - O ID do aluno cujo prompt será atualizado.
- * @returns {TEXT} Uma mensagem de confirmação.
- */
 DECLARE
     v_prompt_record RECORD;
     v_prompt_final_text TEXT;
+    v_prompt_introducao TEXT;
+    v_prompt_persona TEXT;
+    v_prompt_finais TEXT;
 BEGIN
     RAISE NOTICE '[Atualizador Manual] Iniciando a reconstrução do prompt para o aluno ID: %', p_aluno_id;
 
-    -- 1. Busca todos os blocos de contexto da tabela dynamic_prompts
+    -- 1. Busca TODOS os prompts estáticos da config
+    SELECT valor INTO v_prompt_introducao FROM public.config_sistema WHERE chave = 'prompt_introducao';
+    SELECT valor INTO v_prompt_persona FROM public.config_sistema WHERE chave = 'prompt_base_ia';
+    SELECT valor INTO v_prompt_finais FROM public.config_sistema WHERE chave = 'prompt_consideracoes_finais';
+
+    -- 2. Busca todos os blocos de contexto da tabela dynamic_prompts
     SELECT * INTO v_prompt_record
     FROM public.dynamic_prompts
     WHERE aluno_id = p_aluno_id;
@@ -462,9 +459,10 @@ BEGIN
         RETURN 'ERRO: Aluno não encontrado em dynamic_prompts.';
     END IF;
 
-    -- 2. Concatena todos os blocos para formar o prompt final
+    -- 3. Concatena todos os blocos para formar o prompt final (ORDEM CORRIGIDA)
     v_prompt_final_text := CONCAT(
-        COALESCE(v_prompt_record.prompt_base, ''),
+        COALESCE(v_prompt_introducao, ''), E'\n\n',
+        COALESCE(v_prompt_persona, ''),
         E'\n\n---\n\n# CAMADA 2: CONTEXTO DINÂMICO DO ALUNO\n\n',
         '## SAÚDE E ROTINA:', E'\n', COALESCE(v_prompt_record.saude_e_rotina_json::text, '{}'), E'\n\n',
         '## OBJETIVO ATIVO E PROGRESSO:', E'\n', COALESCE(v_prompt_record.objetivo_ativo_json::text, '{}'), E'\n\n',
@@ -473,10 +471,10 @@ BEGIN
         '## CONQUISTAS RECENTES:', E'\n', COALESCE(v_prompt_record.conquistas_recentes_json::text, '[]'), E'\n\n',
         '## INSTRUÇÕES DO NUTRICIONISTA:', E'\n', COALESCE(v_prompt_record.instrucoes_nutricionista_text, 'Nenhuma instrução específica no momento.'), E'\n\n',
         '## INSTRUÇÕES DO PERSONAL TRAINER:', E'\n', COALESCE(v_prompt_record.instrucoes_personal_text, 'Nenhuma instrução específica no momento.'), E'\n\n',
-        '## CONSIDERAÇÕES FINAIS:', E'\n', COALESCE(v_prompt_record.consideracoes_finais_text, 'Seja sempre motivador e baseie-se nos dados para fornecer a melhor orientação possível.')
+        '## CONSIDERAÇÕES FINAIS:', E'\n', COALESCE(v_prompt_finais, '') -- <<-- CORRIGIDO: NO FINAL
     );
 
-    -- 3. Atualiza a coluna prompt_final com o texto recém-criado
+    -- 4. Atualiza a coluna prompt_final com o texto recém-criado
     UPDATE public.dynamic_prompts
     SET prompt_final = v_prompt_final_text
     WHERE aluno_id = p_aluno_id;
@@ -680,6 +678,41 @@ $$;
 ALTER FUNCTION "public"."cleanup_old_processed_messages"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."cron_rebuild_all_prompts"() RETURNS "text"
+    LANGUAGE "plpgsql"
+    AS $$
+/**
+ * @name cron_rebuild_all_prompts
+ * @description
+ * Função mestre para o pg_cron. Itera sobre TODOS os alunos na
+ * tabela 'alunos' e dispara a reconstrução completa do prompt
+ * para cada um deles.
+ */
+DECLARE
+    v_aluno_record RECORD;
+    v_count INTEGER := 0;
+BEGIN
+    RAISE NOTICE '[CRON Job] Iniciando reconstrução noturna de TODOS os prompts...';
+    
+    FOR v_aluno_record IN SELECT id FROM public.alunos
+    LOOP
+        BEGIN
+            PERFORM public.rebuild_full_prompt_for_aluno(v_aluno_record.id);
+            v_count := v_count + 1;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING '[CRON Job] Falha ao processar Aluno ID: %. Erro: %', v_aluno_record.id, SQLERRM;
+        END;
+    END LOOP;
+    
+    RAISE NOTICE '[CRON Job] Reconstrução noturna concluída. Total de alunos processados: %', v_count;
+    RETURN 'Concluído: ' || v_count || ' alunos processados.';
+END;
+$$;
+
+
+ALTER FUNCTION "public"."cron_rebuild_all_prompts"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") RETURNS TABLE("status_code" integer, "response_body" "text")
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -796,6 +829,19 @@ COMMENT ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") IS 'A
 
 
 
+CREATE OR REPLACE FUNCTION "public"."get_current_aluno_id"() RETURNS "uuid"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  SELECT id FROM public.alunos 
+  WHERE auth_user_id = auth.uid()
+  LIMIT 1;
+$$;
+
+
+ALTER FUNCTION "public"."get_current_aluno_id"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") RETURNS "jsonb"
     LANGUAGE "plpgsql"
     AS $$
@@ -830,47 +876,113 @@ COMMENT ON FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") IS 
 
 
 
+CREATE OR REPLACE FUNCTION "public"."get_exercicios_template_json"() RETURNS "jsonb"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    AS $$
+/**
+ * @name get_exercicios_template_json
+ * @description
+ * Retorna um único array JSONB contendo *todos* os exercícios
+ * da tabela 'exercicios_template', formatados como objetos JSON
+ * (incluindo id, nome e grupo muscular).
+ *
+ * @returns {jsonb} Ex: [{"id": 1, "nome_exercicio": "Supino...", "grupo_muscular": "Peito"}, ...]
+ */
+  SELECT jsonb_agg(
+    jsonb_build_object(
+        'id', id,
+        'nome_exercicio', nome_exercicio,
+        'grupo_muscular', grupo_muscular
+    ) ORDER BY grupo_muscular, nome_exercicio -- Ordena o array para consistência
+  )
+  FROM public.exercicios_template;
+$$;
+
+
+ALTER FUNCTION "public"."get_exercicios_template_json"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_full_workout_program_json"("p_program_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
 /**
  * @name get_full_workout_program_json
- * @changelog v1.1: Adicionado o campo 'id' ao objeto JSON de cada
- * exercício, extraído diretamente da tabela `workout_exercises`.
+ * @version 4.0.2
+ * @description
+ * Retorna o plano de treino semanal completo como um objeto JSON.
+ *
+ * @changelog
+ * v4.0.2:
+ * - CORREÇÃO CRÍTICA: Ajustado o mapeamento de dias da semana
+ * para o padrão 1-7 (Domingo=1, Sábado=7) conforme
+ * especificado pelo usuário, em vez do padrão ISO 0-6.
+ * - O filtro foi atualizado para 'pw.dia_da_semana BETWEEN 1 AND 7'.
+ * - O CASE statement foi atualizado para o mapeamento 1-7.
+ * - Isso corrige o erro "field name must not be null".
  */
 DECLARE
-    v_program_json JSONB;
+    v_workouts_json JSONB;
+    v_default_week JSONB := '{
+      "domingo": [],
+      "segunda": [],
+      "terca": [],
+      "quarta": [],
+      "quinta": [],
+      "sexta": [],
+      "sabado": []
+    }';
 BEGIN
-    -- Constrói um objeto JSON onde cada chave é o dia da semana
-    -- e o valor é o objeto do treino daquele dia.
-    SELECT
-        jsonb_object_agg(
-            pw.dia_da_semana,
-            jsonb_build_object(
-                'nome_treino', pw.nome_treino,
-                'exercicios', (
-                    SELECT jsonb_agg(
-                        jsonb_build_object(
-                            -- <<-- ALTERAÇÃO AQUI -->>
-                            'id', we.id, -- Adiciona o ID do exercício ao JSON
-                            'ordem', we.ordem,
-                            'nome', we.nome_exercicio,
-                            'series', we.series,
-                            'repeticoes', we.repeticoes,
-                            'carga_atual_kg', we.carga_kg,
-                            'descanso_seg', we.descanso_segundos
-                        ) ORDER BY we.ordem
-                    )
-                    FROM public.workout_exercises AS we
-                    WHERE we.workout_id = pw.id
-                )
+    -- 1. Agrega os treinos, filtrando pelo padrão 1-7
+    WITH workouts_by_day AS (
+      SELECT
+        pw.dia_da_semana, -- (Agora 1-7)
+        jsonb_agg(
+          jsonb_build_object(
+            'nome_treino', pw.nome_treino,
+            'workout_id', pw.id,
+            'exercicios', (
+              SELECT jsonb_agg(
+                jsonb_build_object(
+                  'id', we.id,
+                  'ordem', we.ordem,
+                  'nome', we.nome_exercicio,
+                  'series', we.series,
+                  'repeticoes', we.repeticoes,
+                  'carga_atual_kg', we.carga_kg,
+                  'descanso_seg', we.descanso_segundos,
+                  'grupo_muscular', we.grupo_muscular,
+                  'exercicio_template_id', we.exercicio_template_id
+                ) ORDER BY we.ordem
+              )
+              FROM public.workout_exercises AS we
+              WHERE we.workout_id = pw.id
             )
-        )
-    INTO v_program_json
-    FROM public.program_workouts AS pw
-    WHERE pw.program_id = p_program_id;
-
-    RETURN COALESCE(v_program_json, '{}'::jsonb);
+          ) ORDER BY pw.id
+        ) AS workouts_do_dia
+      FROM public.program_workouts AS pw
+      WHERE 
+        pw.program_id = p_program_id
+        AND pw.dia_da_semana BETWEEN 1 AND 7 -- <<-- CORREÇÃO AQUI (1-7)
+      GROUP BY pw.dia_da_semana
+    )
+    -- 2. Constrói o JSON final usando o mapeamento 1-7
+    SELECT jsonb_object_agg(
+        CASE wbd.dia_da_semana
+          WHEN 1 THEN 'domingo'  -- <<-- CORREÇÃO AQUI
+          WHEN 2 THEN 'segunda'  -- <<-- CORREÇÃO AQUI
+          WHEN 3 THEN 'terca'    -- <<-- CORREÇÃO AQUI
+          WHEN 4 THEN 'quarta'   -- <<-- CORREÇÃO AQUI
+          WHEN 5 THEN 'quinta'   -- <<-- CORREÇÃO AQUI
+          WHEN 6 THEN 'sexta'    -- <<-- CORREÇÃO AQUI
+          WHEN 7 THEN 'sabado'   -- <<-- CORREÇÃO AQUI
+        END,
+        wbd.workouts_do_dia
+    )
+    INTO v_workouts_json
+    FROM workouts_by_day AS wbd;
+    
+    -- 3. Mescla o molde com os treinos (lógica inalterada)
+    RETURN v_default_week || COALESCE(v_workouts_json, '{}'::jsonb);
 END;
 $$;
 
@@ -1057,6 +1169,160 @@ ALTER FUNCTION "public"."handle_dynamic_prompt_update"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "public"."handle_dynamic_prompt_update"() IS 'Função de gatilho principal. VERSÃO FINAL, incluindo a lógica para todas as tabelas dinâmicas.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+DECLARE
+  v_whatsapp VARCHAR(20);
+  v_nome VARCHAR(255);
+  v_aluno_id UUID;
+BEGIN
+  -- Extrai dados do metadata
+  v_whatsapp := COALESCE(
+    NEW.phone, 
+    NEW.raw_user_meta_data->>'phone',
+    NEW.raw_user_meta_data->>'whatsapp'
+  );
+  
+  v_nome := COALESCE(
+    NEW.raw_user_meta_data->>'full_name',
+    NEW.raw_user_meta_data->>'name',
+    split_part(NEW.email, '@', 1)
+  );
+  
+  -- Tenta encontrar aluno existente pelo WhatsApp
+  IF v_whatsapp IS NOT NULL THEN
+    -- Busca o ID do aluno primeiro
+    SELECT id INTO v_aluno_id
+    FROM public.alunos
+    WHERE whatsapp = v_whatsapp 
+      AND auth_user_id IS NULL
+    LIMIT 1;
+    
+    -- Se encontrou, atualiza
+    IF v_aluno_id IS NOT NULL THEN
+      UPDATE public.alunos
+      SET 
+        auth_user_id = NEW.id,
+        email = COALESCE(email, NEW.email),
+        updated_at = NOW()
+      WHERE id = v_aluno_id;
+      
+      RAISE NOTICE 'Aluno existente vinculado ao auth.user: %', NEW.id;
+      RETURN NEW;
+    END IF;
+  END IF;
+  
+  -- Se não encontrou, cria novo aluno
+  INSERT INTO public.alunos (
+    auth_user_id,
+    nome_completo,
+    whatsapp,
+    email,
+    subscription_status,
+    created_at,
+    updated_at
+  ) VALUES (
+    NEW.id,
+    v_nome,
+    COALESCE(v_whatsapp, ''),
+    NEW.email,
+    'trial',
+    NOW(),
+    NOW()
+  );
+  
+  RAISE NOTICE 'Novo aluno criado para auth.user: %', NEW.id;
+  RETURN NEW;
+  
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'Erro ao criar aluno: %', SQLERRM;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."program_workouts" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "program_id" "uuid" NOT NULL,
+    "dia_da_semana" smallint NOT NULL,
+    "nome_treino" character varying(255)
+);
+
+
+ALTER TABLE "public"."program_workouts" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."program_workouts" IS 'Tabela de ligação que define qual treino ocorre em qual dia da semana para um determinado programa.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") RETURNS SETOF "public"."program_workouts"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+  v_program_id UUID;
+  v_program_record RECORD;
+BEGIN
+  -- Etapa 1: Desativar todos os planos de treino anteriores deste aluno
+  UPDATE public.workout_programs
+  SET is_active = false
+  WHERE aluno_id = p_aluno_id;
+
+  -- Etapa 2: Inserir o novo programa de treino principal
+  INSERT INTO public.workout_programs (
+    aluno_id,
+    nome_programa,
+    objetivo,
+    frequencia_semanal,
+    is_active,
+    data_inicio
+  )
+  VALUES (
+    p_aluno_id,
+    p_nome_programa,
+    p_objetivo,
+    p_frequencia,
+    true,
+    CURRENT_DATE
+  )
+  RETURNING id INTO v_program_id;
+
+  -- Etapa 3: Inserir os treinos da semana (program_workouts)
+  -- Usamos jsonb_array_elements para fazer o loop e o INSERT de uma só vez
+  INSERT INTO public.program_workouts (
+    program_id,
+    nome_treino,
+    dia_da_semana
+  )
+  SELECT
+    v_program_id,
+    (rec ->> 'nome_programa')::TEXT,
+    (rec ->> 'dia_da_semana')::SMALLINT
+  FROM jsonb_array_elements(p_programas_json) AS rec;
+
+  -- Etapa 4: Retornar a lista de program_workouts recém-criados
+  RETURN QUERY
+  SELECT *
+  FROM public.program_workouts
+  WHERE program_id = v_program_id
+  ORDER BY dia_da_semana;
+
+END;
+$$;
+
+
+ALTER FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."invoke_testar_extracao_edge_function"() RETURNS "text"
@@ -1820,6 +2086,45 @@ COMMENT ON FUNCTION "public"."rebuild_conquistas_recentes_json"("p_aluno_id" "uu
 
 
 
+CREATE OR REPLACE FUNCTION "public"."rebuild_full_prompt_for_aluno"("p_aluno_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql"
+    AS $$
+/**
+ * @name rebuild_full_prompt_for_aluno
+ * @description
+ * Função "wrapper" que executa TODAS as funções de rebuild de
+ * JSON para um único aluno e, ao final, chama a função de
+ * montagem final do 'prompt_final'.
+ */
+BEGIN
+    RAISE NOTICE '[Rebuild Noturno] Reconstruindo blocos para Aluno ID: %', p_aluno_id;
+    
+    -- 1. Reconstrói a saúde e rotina
+    PERFORM public.rebuild_saude_e_rotina_json(p_aluno_id);
+    
+    -- 2. Reconstrói o objetivo ativo e progresso
+    PERFORM public.rebuild_objetivo_ativo_json(p_aluno_id);
+    
+    -- 3. Reconstrói o plano alimentar
+    PERFORM public.rebuild_plano_alimentar_json(p_aluno_id);
+    
+    -- 4. Reconstrói o plano de treino (com a nova lógica v4.0.2)
+    PERFORM public.rebuild_plano_treino_json(p_aluno_id);
+    
+    -- 5. Reconstrói as conquistas recentes
+    PERFORM public.rebuild_conquistas_recentes_json(p_aluno_id);
+    
+    -- 6. Chama a função de montagem final (que concatena tudo)
+    PERFORM public.atualizar_prompt_final_para_aluno(p_aluno_id);
+
+    RAISE NOTICE '[Rebuild Noturno] Concluído para Aluno ID: %', p_aluno_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."rebuild_full_prompt_for_aluno"("p_aluno_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."rebuild_objetivo_ativo_json"("p_aluno_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -1903,11 +2208,18 @@ COMMENT ON FUNCTION "public"."rebuild_objetivo_ativo_json"("p_aluno_id" "uuid") 
 CREATE OR REPLACE FUNCTION "public"."rebuild_plano_alimentar_json"("p_aluno_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
+/**
+ * @name rebuild_plano_alimentar_json
+ * @version 1.1.0
+ * @changelog v1.1.0: Corrigido o bug 'INSERT' (falha silenciosa).
+ * - Substituído 'UPDATE' por 'INSERT ... ON CONFLICT (aluno_id) DO UPDATE'.
+ */
 DECLARE
     v_diet_plan_record RECORD;
     v_prefs_record RECORD;
+    v_json_output JSONB;
 BEGIN
-    RAISE NOTICE 'Executando rebuild_plano_alimentar_json para o aluno ID: %', p_aluno_id;
+    RAISE NOTICE '[Rebuild Plano Alimentar v1.1] Iniciando para o aluno ID: %', p_aluno_id;
 
     -- 1. Busca o plano de dieta ativo
     SELECT * INTO v_diet_plan_record
@@ -1916,19 +2228,22 @@ BEGIN
     LIMIT 1;
 
     IF NOT FOUND THEN
-        RAISE WARNING 'Nenhum plano de dieta ativo encontrado para o aluno ID: %', p_aluno_id;
-        UPDATE public.dynamic_prompts SET plano_alimentar_json = NULL WHERE aluno_id = p_aluno_id;
+        RAISE WARNING '[Rebuild Plano Alimentar v1.1] Nenhum plano de dieta ativo encontrado para o aluno ID: %', p_aluno_id;
+        -- Garante que a linha exista e limpa o JSON
+        INSERT INTO public.dynamic_prompts (aluno_id, plano_alimentar_json)
+        VALUES (p_aluno_id, NULL)
+        ON CONFLICT (aluno_id) DO UPDATE
+        SET plano_alimentar_json = NULL, updated_at = NOW();
         RETURN;
     END IF;
 
-    -- 2. Busca as preferências alimentares
+    -- 2. Busca as preferências alimentares (pode ser nulo)
     SELECT * INTO v_prefs_record
     FROM public.preferencias_alimentares
     WHERE aluno_id = p_aluno_id;
 
-    -- 3. Atualiza a coluna JSONB na tabela dynamic_prompts
-    UPDATE public.dynamic_prompts
-    SET plano_alimentar_json = jsonb_build_object(
+    -- 3. Monta o JSON final
+    v_json_output := jsonb_build_object(
         'versao', v_diet_plan_record.version,
         'metas_diarias', v_diet_plan_record.meta_diaria_geral,
         'plano_do_dia', public.get_diet_for_today(v_diet_plan_record.plano_semanal),
@@ -1939,10 +2254,17 @@ BEGIN
             'disposicao_cozinhar', v_prefs_record.disposicao_cozinhar,
             'orcamento', v_prefs_record.orcamento_alimentar
         )
-    )
-    WHERE aluno_id = p_aluno_id;
+    );
 
-    RAISE NOTICE ' -> Coluna plano_alimentar_json atualizada com sucesso.';
+    -- 4. Atualiza a coluna (Usando UPSERT)
+    INSERT INTO public.dynamic_prompts (aluno_id, plano_alimentar_json)
+    VALUES (p_aluno_id, v_json_output)
+    ON CONFLICT (aluno_id) DO UPDATE
+    SET 
+      plano_alimentar_json = v_json_output,
+      updated_at = NOW();
+      
+    RAISE NOTICE '[Rebuild Plano Alimentar v1.1] ✅ JSON de plano alimentar atualizado.';
 END;
 $$;
 
@@ -2011,14 +2333,22 @@ COMMENT ON FUNCTION "public"."rebuild_plano_treino_json"("p_aluno_id" "uuid") IS
 CREATE OR REPLACE FUNCTION "public"."rebuild_prompt_final"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
+DECLARE
+    v_prompt_introducao TEXT;
+    v_prompt_persona TEXT;
+    v_prompt_finais TEXT;
 BEGIN
     RAISE NOTICE '[Master Trigger] Reconstruindo prompt_final para o aluno ID: %', NEW.aluno_id;
+    
+    -- 1. Busca TODOS os prompts estáticos da config
+    SELECT valor INTO v_prompt_introducao FROM public.config_sistema WHERE chave = 'prompt_introducao';
+    SELECT valor INTO v_prompt_persona FROM public.config_sistema WHERE chave = 'prompt_base_ia';
+    SELECT valor INTO v_prompt_finais FROM public.config_sistema WHERE chave = 'prompt_consideracoes_finais';
 
-    -- Concatena todas as colunas de contexto para formar o prompt final.
-    -- O "E'\n\n'" cria quebras de linha para formatar o texto.
-    -- COALESCE garante que, se uma coluna for nula, não cause erro.
+    -- 2. Concatena tudo (ORDEM CORRIGIDA)
     NEW.prompt_final := CONCAT(
-        COALESCE(NEW.prompt_base, ''),
+        COALESCE(v_prompt_introducao, ''), E'\n\n',
+        COALESCE(v_prompt_persona, ''),
         E'\n\n---\n\n# CAMADA 2: CONTEXTO DINÂMICO DO ALUNO\n\n',
         '## SAÚDE E ROTINA:', E'\n', COALESCE(NEW.saude_e_rotina_json::text, '{}'), E'\n\n',
         '## OBJETIVO ATIVO E PROGRESSO:', E'\n', COALESCE(NEW.objetivo_ativo_json::text, '{}'), E'\n\n',
@@ -2027,11 +2357,9 @@ BEGIN
         '## CONQUISTAS RECENTES:', E'\n', COALESCE(NEW.conquistas_recentes_json::text, '[]'), E'\n\n',
         '## INSTRUÇÕES DO NUTRICIONISTA:', E'\n', COALESCE(NEW.instrucoes_nutricionista_text, 'Nenhuma instrução específica no momento.'), E'\n\n',
         '## INSTRUÇÕES DO PERSONAL TRAINER:', E'\n', COALESCE(NEW.instrucoes_personal_text, 'Nenhuma instrução específica no momento.'), E'\n\n',
-        '## CONSIDERAÇÕES FINAIS:', E'\n', COALESCE(NEW.consideracoes_finais_text, 'Seja sempre motivador e baseie-se nos dados para fornecer a melhor orientação possível.')
+        '## CONSIDERAÇÕES FINAIS:', E'\n', COALESCE(v_prompt_finais, '') -- <<-- CORRIGIDO: NO FINAL
     );
     
-    -- Retorna a linha (NEW) com a coluna `prompt_final` preenchida,
-    -- para que a operação (INSERT/UPDATE) seja salva no banco.
     RETURN NEW;
 END;
 $$;
@@ -2450,10 +2778,6 @@ ALTER FUNCTION "public"."update_updated_at_column"() OWNER TO "postgres";
 COMMENT ON FUNCTION "public"."update_updated_at_column"() IS 'Função trigger genérica que atualiza automaticamente o campo updated_at para NOW() em qualquer UPDATE.';
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = "heap";
-
 
 CREATE TABLE IF NOT EXISTS "public"."achievements" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -2493,13 +2817,17 @@ COMMENT ON COLUMN "public"."achievements"."categoria" IS 'Categoria da conquista
 CREATE TABLE IF NOT EXISTS "public"."alunos" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "nome_completo" character varying(255) NOT NULL,
-    "whatsapp" character varying(20) NOT NULL,
+    "whatsapp" character varying(20) DEFAULT ''::character varying,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "subscription_status" character varying(30) DEFAULT 'trial'::character varying,
     "last_interaction_at" timestamp with time zone,
     "agregacao_agendada" boolean DEFAULT false NOT NULL,
-    "aguardando_confirmacao" "jsonb"
+    "aguardando_confirmacao" "jsonb",
+    "auth_user_id" "uuid",
+    "email" character varying(255),
+    "avatar_url" "text",
+    "is_onboarding_complete" boolean DEFAULT false
 );
 
 
@@ -2773,7 +3101,6 @@ COMMENT ON TABLE "public"."diet_plans" IS 'Planos alimentares personalizados e v
 CREATE TABLE IF NOT EXISTS "public"."dynamic_prompts" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
-    "prompt_base" "text",
     "saude_e_rotina_json" "jsonb",
     "objetivo_ativo_json" "jsonb",
     "plano_alimentar_json" "jsonb",
@@ -2781,7 +3108,6 @@ CREATE TABLE IF NOT EXISTS "public"."dynamic_prompts" (
     "conquistas_recentes_json" "text",
     "instrucoes_nutricionista_text" "text",
     "instrucoes_personal_text" "text",
-    "consideracoes_finais_text" "text",
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "prompt_final" "text",
     "conversation_id" "text",
@@ -2793,10 +3119,6 @@ ALTER TABLE "public"."dynamic_prompts" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."dynamic_prompts" IS 'Tabela central de cache de contexto para a IA. Cada coluna armazena um "bloco" de informações do aluno, que são atualizadas por triggers para montagem eficiente do prompt.';
-
-
-
-COMMENT ON COLUMN "public"."dynamic_prompts"."prompt_base" IS 'O template estático do prompt (personalidade e regras do Dr. NutriCoach).';
 
 
 
@@ -2828,10 +3150,6 @@ COMMENT ON COLUMN "public"."dynamic_prompts"."instrucoes_personal_text" IS 'Inst
 
 
 
-COMMENT ON COLUMN "public"."dynamic_prompts"."consideracoes_finais_text" IS 'Texto final de encerramento do prompt com diretrizes gerais.';
-
-
-
 COMMENT ON COLUMN "public"."dynamic_prompts"."prompt_final" IS 'O conteúdo completo e final do prompt, concatenado automaticamente por um trigger, pronto para ser enviado à IA.';
 
 
@@ -2858,7 +3176,7 @@ CREATE TABLE IF NOT EXISTS "public"."exercicios_template" (
     "id" integer NOT NULL,
     "nome_exercicio" "text" NOT NULL,
     "grupo_muscular" "text" NOT NULL,
-    CONSTRAINT "chk_grupo_muscular" CHECK (("grupo_muscular" = ANY (ARRAY['Peito'::"text", 'Costas'::"text", 'Perna'::"text", 'Ombro'::"text", 'Braço'::"text", 'Abdômen'::"text"])))
+    CONSTRAINT "chk_grupo_muscular" CHECK (("grupo_muscular" = ANY (ARRAY['Peito'::"text", 'Costas'::"text", 'Perna'::"text", 'Ombro'::"text", 'Braço'::"text", 'Abdômen'::"text", 'Cardio'::"text"])))
 );
 
 
@@ -3268,19 +3586,23 @@ COMMENT ON COLUMN "public"."processed_webhook_messages"."status" IS 'Status do p
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."program_workouts" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "program_id" "uuid" NOT NULL,
-    "dia_da_semana" smallint NOT NULL,
-    "nome_treino" character varying(255)
+CREATE TABLE IF NOT EXISTS "public"."prompts_sistema" (
+    "chave" "text" NOT NULL,
+    "prompt_base" "text",
+    "informacoes" "text",
+    "consideracoes_finais" "text",
+    "functions_jsonb" "jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "prompt_final" "text" GENERATED ALWAYS AS (((((COALESCE("prompt_base", ''::"text") || '
+
+'::"text") || COALESCE("informacoes", ''::"text")) || '
+
+'::"text") || COALESCE("consideracoes_finais", ''::"text"))) STORED
 );
 
 
-ALTER TABLE "public"."program_workouts" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."program_workouts" IS 'Tabela de ligação que define qual treino ocorre em qual dia da semana para um determinado programa.';
-
+ALTER TABLE "public"."prompts_sistema" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."saude_e_rotina" (
@@ -3431,6 +3753,35 @@ COMMENT ON COLUMN "public"."usage_metrics"."web_search_ativado" IS 'Indica se a 
 
 
 COMMENT ON COLUMN "public"."usage_metrics"."api_response_body" IS 'Armazena o corpo JSON completo da resposta da API da OpenAI para auditoria e futuras análises.';
+
+
+
+CREATE OR REPLACE VIEW "public"."vw_aluno_completo" AS
+ SELECT "a"."id",
+    "a"."nome_completo",
+    "a"."whatsapp",
+    "a"."created_at",
+    "a"."updated_at",
+    "a"."subscription_status",
+    "a"."last_interaction_at",
+    "a"."agregacao_agendada",
+    "a"."aguardando_confirmacao",
+    "a"."auth_user_id",
+    "a"."email",
+    "a"."avatar_url",
+    "a"."is_onboarding_complete",
+    "u"."email" AS "auth_email",
+    "u"."email_confirmed_at",
+    "u"."phone" AS "auth_phone",
+    "u"."last_sign_in_at"
+   FROM ("public"."alunos" "a"
+     LEFT JOIN "auth"."users" "u" ON (("a"."auth_user_id" = "u"."id")));
+
+
+ALTER VIEW "public"."vw_aluno_completo" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."vw_aluno_completo" IS 'View que combina dados do aluno com informações de autenticação';
 
 
 
@@ -3707,6 +4058,91 @@ ALTER MATERIALIZED VIEW "public"."vw_nutricao_resumo_semanal" OWNER TO "postgres
 
 COMMENT ON MATERIALIZED VIEW "public"."vw_nutricao_resumo_semanal" IS 'Histórico completo de consumo nutricional agrupado por semana. Uma linha para cada semana desde o primeiro registro. Atualizado automaticamente toda segunda-feira às 01:00.';
 
+
+
+CREATE OR REPLACE VIEW "public"."vw_perfil_completo_aluno" AS
+ WITH "medidas_iniciais" AS (
+         SELECT "bm"."id",
+            "bm"."aluno_id",
+            "bm"."data_medicao",
+            "bm"."peso_kg",
+            "bm"."altura_cm",
+            "bm"."circunferencia_pescoco_cm",
+            "bm"."circunferencia_cintura_cm",
+            "bm"."circunferencia_quadril_cm",
+            "bm"."percentual_gordura",
+            "bm"."fotos_urls",
+            "bm"."created_at",
+            "bm"."notas",
+            "bm"."feedback_subjetivo",
+            "bm"."circunferencia_peito_cm",
+            "bm"."medidas_json",
+            "row_number"() OVER (PARTITION BY "bm"."aluno_id" ORDER BY "bm"."data_medicao", "bm"."created_at") AS "rn"
+           FROM "public"."body_metrics" "bm"
+        )
+ SELECT "a"."id" AS "aluno_id",
+    "a"."nome_completo",
+    "a"."whatsapp",
+    "sr"."id" AS "saude_e_rotina_id",
+    "g"."id" AS "goal_id_ativo",
+    "pa"."id" AS "preferencias_alimentares_id",
+    "pt"."id" AS "preferencias_treino_id",
+    "mi"."id" AS "medidas_iniciais_id",
+    "date_part"('year'::"text", "age"(("sr"."data_nascimento")::timestamp with time zone)) AS "idade",
+    "sr"."altura_cm",
+    "g"."valor_inicial" AS "peso_inicial_meta",
+    "g"."valor_meta" AS "meta_de_peso",
+    "g"."nome_meta" AS "objetivo_principal",
+    ( SELECT "instrucoes_nutricionista"."instrucoes_texto"
+           FROM "public"."instrucoes_nutricionista"
+          WHERE ("instrucoes_nutricionista"."aluno_id" = "a"."id")) AS "anotacoes_nutricionista",
+    ( SELECT "instrucoes_personal"."instrucoes_texto"
+           FROM "public"."instrucoes_personal"
+          WHERE ("instrucoes_personal"."aluno_id" = "a"."id")) AS "anotacoes_personal",
+    "sr"."condicoes_medicas",
+    "sr"."medicacoes_em_uso",
+    "sr"."alergias",
+    "sr"."lesoes_limitacoes",
+    "g"."metrica_primaria" AS "tipo_meta",
+    "g"."data_fim" AS "prazo_meta",
+    "g"."motivacao_principal" AS "motivacao_meta",
+    "sr"."profissao",
+    "sr"."horario_acordar",
+    "sr"."horario_dormir",
+    "pa"."restricoes_alimentares",
+    "pa"."alimentos_nao_gosta",
+    "pa"."alimentos_favoritos",
+    "pa"."disposicao_cozinhar",
+    "pa"."orcamento_alimentar",
+    "pt"."local_treino",
+    "pt"."equipamentos_disponiveis",
+    "pt"."experiencia_treino",
+    "pt"."dias_preferenciais_treino",
+    "pt"."horarios_preferenciais_treino",
+    "mi"."data_medicao" AS "data_medidas_iniciais",
+    "mi"."peso_kg" AS "peso_medidas_iniciais",
+    "mi"."altura_cm" AS "altura_medidas_iniciais",
+    "mi"."circunferencia_pescoco_cm" AS "pescoco_inicial",
+    "mi"."circunferencia_peito_cm" AS "peito_inicial",
+    "mi"."circunferencia_cintura_cm" AS "cintura_inicial",
+    "mi"."circunferencia_quadril_cm" AS "quadril_inicial",
+    "mi"."percentual_gordura" AS "gordura_inicial",
+    "mi"."notas" AS "notas_medidas_iniciais",
+    (("mi"."medidas_json" ->> 'braco_dir'::"text"))::numeric AS "braco_dir_inicial",
+    (("mi"."medidas_json" ->> 'braco_esq'::"text"))::numeric AS "braco_esq_inicial",
+    (("mi"."medidas_json" ->> 'coxa_dir'::"text"))::numeric AS "coxa_dir_inicial",
+    (("mi"."medidas_json" ->> 'coxa_esq'::"text"))::numeric AS "coxa_esq_inicial",
+    (("mi"."medidas_json" ->> 'panturrilha_dir'::"text"))::numeric AS "panturrilha_dir_inicial",
+    (("mi"."medidas_json" ->> 'panturrilha_esq'::"text"))::numeric AS "panturrilha_esq_inicial"
+   FROM ((((("public"."alunos" "a"
+     LEFT JOIN "public"."saude_e_rotina" "sr" ON (("a"."id" = "sr"."aluno_id")))
+     LEFT JOIN "public"."goals" "g" ON ((("a"."id" = "g"."aluno_id") AND (("g"."status")::"text" = 'ativo'::"text"))))
+     LEFT JOIN "public"."preferencias_alimentares" "pa" ON (("a"."id" = "pa"."aluno_id")))
+     LEFT JOIN "public"."preferencias_treino" "pt" ON (("a"."id" = "pt"."aluno_id")))
+     LEFT JOIN "medidas_iniciais" "mi" ON ((("a"."id" = "mi"."aluno_id") AND ("mi"."rn" = 1))));
+
+
+ALTER VIEW "public"."vw_perfil_completo_aluno" OWNER TO "postgres";
 
 
 CREATE OR REPLACE VIEW "public"."vw_teste_semana_atual" AS
@@ -3993,11 +4429,6 @@ ALTER TABLE ONLY "public"."alunos"
 
 
 
-ALTER TABLE ONLY "public"."alunos"
-    ADD CONSTRAINT "alunos_whatsapp_key" UNIQUE ("whatsapp");
-
-
-
 ALTER TABLE ONLY "public"."body_metrics"
     ADD CONSTRAINT "body_metrics_pkey" PRIMARY KEY ("id");
 
@@ -4168,6 +4599,11 @@ ALTER TABLE ONLY "public"."program_workouts"
 
 
 
+ALTER TABLE ONLY "public"."prompts_sistema"
+    ADD CONSTRAINT "prompts_sistema_pkey" PRIMARY KEY ("chave");
+
+
+
 ALTER TABLE ONLY "public"."saude_e_rotina"
     ADD CONSTRAINT "saude_e_rotina_aluno_id_key" UNIQUE ("aluno_id");
 
@@ -4208,11 +4644,23 @@ ALTER TABLE ONLY "public"."workout_programs"
 
 
 
+CREATE UNIQUE INDEX "alunos_whatsapp_unique_idx" ON "public"."alunos" USING "btree" ("whatsapp") WHERE (("whatsapp" IS NOT NULL) AND (("whatsapp")::"text" <> ''::"text"));
+
+
+
 CREATE INDEX "idx_alunos_aguardando" ON "public"."alunos" USING "btree" ((("aguardando_confirmacao" ->> 'aguardando'::"text")));
 
 
 
+CREATE UNIQUE INDEX "idx_alunos_auth_user_id" ON "public"."alunos" USING "btree" ("auth_user_id") WHERE ("auth_user_id" IS NOT NULL);
+
+
+
 CREATE INDEX "idx_alunos_created_at" ON "public"."alunos" USING "btree" ("created_at");
+
+
+
+CREATE INDEX "idx_alunos_email" ON "public"."alunos" USING "btree" ("email") WHERE ("email" IS NOT NULL);
 
 
 
@@ -4496,6 +4944,10 @@ CREATE UNIQUE INDEX "unique_active_goal_per_aluno" ON "public"."goals" USING "bt
 
 
 
+CREATE OR REPLACE TRIGGER "handle_prompts_sistema_updated_at" BEFORE UPDATE ON "public"."prompts_sistema" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
 CREATE OR REPLACE TRIGGER "trigger_achievements_changes" AFTER INSERT OR DELETE ON "public"."achievements" FOR EACH ROW EXECUTE FUNCTION "public"."handle_dynamic_prompt_update"();
 
 
@@ -4551,6 +5003,11 @@ ALTER TABLE ONLY "public"."achievements"
 
 ALTER TABLE ONLY "public"."achievements"
     ADD CONSTRAINT "achievements_goal_id_fkey" FOREIGN KEY ("goal_id") REFERENCES "public"."goals"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."alunos"
+    ADD CONSTRAINT "alunos_auth_user_id_fkey" FOREIGN KEY ("auth_user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -4714,6 +5171,30 @@ ALTER TABLE ONLY "public"."workout_programs"
 
 
 
+CREATE POLICY "Alunos atualizam apenas seus goals" ON "public"."goals" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Alunos gerenciam apenas suas métricas" ON "public"."body_metrics" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Alunos podem atualizar seus próprios dados" ON "public"."alunos" FOR UPDATE TO "authenticated" USING (("auth"."uid"() = "auth_user_id")) WITH CHECK (("auth"."uid"() = "auth_user_id"));
+
+
+
+CREATE POLICY "Alunos podem ver seus próprios dados" ON "public"."alunos" FOR SELECT TO "authenticated" USING (("auth"."uid"() = "auth_user_id"));
+
+
+
+CREATE POLICY "Alunos veem apenas seus goals" ON "public"."goals" FOR SELECT TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Alunos veem apenas suas métricas" ON "public"."body_metrics" FOR SELECT TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
 CREATE POLICY "Service role can read config" ON "public"."config_sistema" FOR SELECT TO "service_role" USING (true);
 
 
@@ -4722,10 +5203,71 @@ CREATE POLICY "Service role pode ler funcoes_ia" ON "public"."funcoes_ia" FOR SE
 
 
 
+CREATE POLICY "Service role pode ler prompts_sistema" ON "public"."prompts_sistema" FOR SELECT TO "service_role" USING (true);
+
+
+
+CREATE POLICY "Usuários podem atualizar sua própria saúde" ON "public"."saude_e_rotina" FOR UPDATE TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem criar seu próprio registro" ON "public"."alunos" FOR INSERT TO "authenticated" WITH CHECK (("auth_user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Usuários podem criar seu próprio registro de aluno" ON "public"."alunos" FOR INSERT TO "authenticated" WITH CHECK (("auth_user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "Usuários podem gerenciar seus objetivos" ON "public"."goals" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem gerenciar suas métricas" ON "public"."body_metrics" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem gerenciar suas preferências alimentares" ON "public"."preferencias_alimentares" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem gerenciar suas preferências de treino" ON "public"."preferencias_treino" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem inserir sua própria saúde" ON "public"."saude_e_rotina" FOR INSERT TO "authenticated" WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Usuários podem ver sua própria saúde" ON "public"."saude_e_rotina" FOR SELECT TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+ALTER TABLE "public"."alunos" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."body_metrics" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."config_sistema" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."funcoes_ia" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."goals" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."preferencias_alimentares" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."preferencias_treino" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."prompts_sistema" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."saude_e_rotina" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -4975,6 +5517,12 @@ GRANT ALL ON FUNCTION "public"."cleanup_old_processed_messages"() TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "anon";
+GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "service_role";
@@ -4987,9 +5535,21 @@ GRANT ALL ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") TO 
 
 
 
+GRANT ALL ON FUNCTION "public"."get_current_aluno_id"() TO "anon";
+GRANT ALL ON FUNCTION "public"."get_current_aluno_id"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_current_aluno_id"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "anon";
+GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "service_role";
 
 
 
@@ -5014,6 +5574,24 @@ GRANT ALL ON FUNCTION "public"."get_workout_for_today"("p_program_id" "uuid") TO
 GRANT ALL ON FUNCTION "public"."handle_dynamic_prompt_update"() TO "anon";
 GRANT ALL ON FUNCTION "public"."handle_dynamic_prompt_update"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."handle_dynamic_prompt_update"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "anon";
+GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."program_workouts" TO "anon";
+GRANT ALL ON TABLE "public"."program_workouts" TO "authenticated";
+GRANT ALL ON TABLE "public"."program_workouts" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "service_role";
 
 
 
@@ -5068,6 +5646,12 @@ GRANT ALL ON FUNCTION "public"."propor_registro_refeicao"("p_aluno_id" "uuid", "
 GRANT ALL ON FUNCTION "public"."rebuild_conquistas_recentes_json"("p_aluno_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."rebuild_conquistas_recentes_json"("p_aluno_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rebuild_conquistas_recentes_json"("p_aluno_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."rebuild_full_prompt_for_aluno"("p_aluno_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."rebuild_full_prompt_for_aluno"("p_aluno_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rebuild_full_prompt_for_aluno"("p_aluno_id" "uuid") TO "service_role";
 
 
 
@@ -5330,9 +5914,9 @@ GRANT ALL ON TABLE "public"."processed_webhook_messages" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."program_workouts" TO "anon";
-GRANT ALL ON TABLE "public"."program_workouts" TO "authenticated";
-GRANT ALL ON TABLE "public"."program_workouts" TO "service_role";
+GRANT ALL ON TABLE "public"."prompts_sistema" TO "anon";
+GRANT ALL ON TABLE "public"."prompts_sistema" TO "authenticated";
+GRANT ALL ON TABLE "public"."prompts_sistema" TO "service_role";
 
 
 
@@ -5351,6 +5935,12 @@ GRANT ALL ON TABLE "public"."subscriptions" TO "service_role";
 GRANT ALL ON TABLE "public"."usage_metrics" TO "anon";
 GRANT ALL ON TABLE "public"."usage_metrics" TO "authenticated";
 GRANT ALL ON TABLE "public"."usage_metrics" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."vw_aluno_completo" TO "anon";
+GRANT ALL ON TABLE "public"."vw_aluno_completo" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_aluno_completo" TO "service_role";
 
 
 
@@ -5387,6 +5977,12 @@ GRANT ALL ON TABLE "public"."vw_nutricao_resumo_mensal" TO "service_role";
 GRANT ALL ON TABLE "public"."vw_nutricao_resumo_semanal" TO "anon";
 GRANT ALL ON TABLE "public"."vw_nutricao_resumo_semanal" TO "authenticated";
 GRANT ALL ON TABLE "public"."vw_nutricao_resumo_semanal" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."vw_perfil_completo_aluno" TO "anon";
+GRANT ALL ON TABLE "public"."vw_perfil_completo_aluno" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_perfil_completo_aluno" TO "service_role";
 
 
 
@@ -5492,6 +6088,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict PIU73Mao5btS6pCZvBMdi3NB13zHY7UOdq0igXL2bxJGQJTTDIEfRsxed50dEvH
+\unrestrict o1kBH3Sft6cIBdsJSYgnDbPUzWILykPW5w5IABCqjSycXsoWLsz3HdVliCezjGd
 
 RESET ALL;
