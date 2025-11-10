@@ -1,5 +1,5 @@
 
-\restrict o1kBH3Sft6cIBdsJSYgnDbPUzWILykPW5w5IABCqjSycXsoWLsz3HdVliCezjGd
+\restrict LN7MklLdhFJymTT2rd2hRR8s0H9sq9LZHwHjpHMs9esZLHY64qiOpAMg0HyUm6A
 
 
 SET statement_timeout = 0;
@@ -1247,39 +1247,19 @@ $$;
 
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
-SET default_tablespace = '';
 
-SET default_table_access_method = "heap";
-
-
-CREATE TABLE IF NOT EXISTS "public"."program_workouts" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "program_id" "uuid" NOT NULL,
-    "dia_da_semana" smallint NOT NULL,
-    "nome_treino" character varying(255)
-);
-
-
-ALTER TABLE "public"."program_workouts" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."program_workouts" IS 'Tabela de ligação que define qual treino ocorre em qual dia da semana para um determinado programa.';
-
-
-
-CREATE OR REPLACE FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") RETURNS SETOF "public"."program_workouts"
+CREATE OR REPLACE FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") RETURNS TABLE("id" "uuid", "dia_da_semana" smallint, "nome_treino" character varying)
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
 DECLARE
   v_program_id UUID;
-  v_program_record RECORD;
 BEGIN
-  -- Etapa 1: Desativar todos os planos de treino anteriores deste aluno
+  -- Desativar planos anteriores
   UPDATE public.workout_programs
   SET is_active = false
   WHERE aluno_id = p_aluno_id;
 
-  -- Etapa 2: Inserir o novo programa de treino principal
+  -- Criar novo programa
   INSERT INTO public.workout_programs (
     aluno_id,
     nome_programa,
@@ -1296,10 +1276,9 @@ BEGIN
     true,
     CURRENT_DATE
   )
-  RETURNING id INTO v_program_id;
+  RETURNING workout_programs.id INTO v_program_id;
 
-  -- Etapa 3: Inserir os treinos da semana (program_workouts)
-  -- Usamos jsonb_array_elements para fazer o loop e o INSERT de uma só vez
+  -- Criar treinos da semana
   INSERT INTO public.program_workouts (
     program_id,
     nome_treino,
@@ -1311,12 +1290,15 @@ BEGIN
     (rec ->> 'dia_da_semana')::SMALLINT
   FROM jsonb_array_elements(p_programas_json) AS rec;
 
-  -- Etapa 4: Retornar a lista de program_workouts recém-criados
+  -- Retornar apenas program_workouts (SEM workout_programs.id)
   RETURN QUERY
-  SELECT *
-  FROM public.program_workouts
-  WHERE program_id = v_program_id
-  ORDER BY dia_da_semana;
+  SELECT 
+    pw.id,
+    pw.dia_da_semana,
+    pw.nome_treino
+  FROM public.program_workouts pw
+  WHERE pw.program_id = v_program_id
+  ORDER BY pw.dia_da_semana;
 
 END;
 $$;
@@ -2778,6 +2760,10 @@ ALTER FUNCTION "public"."update_updated_at_column"() OWNER TO "postgres";
 COMMENT ON FUNCTION "public"."update_updated_at_column"() IS 'Função trigger genérica que atualiza automaticamente o campo updated_at para NOW() em qualquer UPDATE.';
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
 
 CREATE TABLE IF NOT EXISTS "public"."achievements" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -3320,7 +3306,10 @@ CREATE TABLE IF NOT EXISTS "public"."instrucoes_nutricionista" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
     "instrucoes_texto" "text",
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "instrucoes_da_ia" "text",
+    "logs_ia" "jsonb",
+    "conversation_id" "text"
 );
 
 
@@ -3331,11 +3320,26 @@ COMMENT ON TABLE "public"."instrucoes_nutricionista" IS 'Armazena instruções e
 
 
 
+COMMENT ON COLUMN "public"."instrucoes_nutricionista"."instrucoes_texto" IS 'A instrução FINAL, editada e aprovada pelo humano, que será mostrada ao aluno.';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_nutricionista"."instrucoes_da_ia" IS 'Sugestão de instrução gerada pela IA (em texto) para revisão do nutricionista.';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_nutricionista"."logs_ia" IS 'Log de dados brutos (JSON) das análises da IA para auditoria e "legado".';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."instrucoes_personal" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
     "instrucoes_texto" "text",
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "instrucoes_da_ia" "text",
+    "logs_ia" "jsonb",
+    "conversation_id" "text"
 );
 
 
@@ -3343,6 +3347,18 @@ ALTER TABLE "public"."instrucoes_personal" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."instrucoes_personal" IS 'Armazena instruções específicas e personalizadas de um personal trainer para o aluno.';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_personal"."instrucoes_texto" IS 'A instrução FINAL, editada e aprovada pelo humano, que será mostrada ao aluno.';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_personal"."instrucoes_da_ia" IS 'Sugestão de instrução gerada pela IA (em texto) para revisão do personal trainer.';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_personal"."logs_ia" IS 'Log de dados brutos (JSON) das análises da IA para auditoria e "legado".';
 
 
 
@@ -3583,6 +3599,21 @@ ALTER TABLE "public"."processed_webhook_messages" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "public"."processed_webhook_messages"."status" IS 'Status do processamento: processing (em andamento), completed (concluído), failed (falhou)';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."program_workouts" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "program_id" "uuid" NOT NULL,
+    "dia_da_semana" smallint NOT NULL,
+    "nome_treino" character varying(255)
+);
+
+
+ALTER TABLE "public"."program_workouts" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."program_workouts" IS 'Tabela de ligação que define qual treino ocorre em qual dia da semana para um determinado programa.';
 
 
 
@@ -5583,12 +5614,6 @@ GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."program_workouts" TO "anon";
-GRANT ALL ON TABLE "public"."program_workouts" TO "authenticated";
-GRANT ALL ON TABLE "public"."program_workouts" TO "service_role";
-
-
-
 GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "anon";
 GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."iniciar_novo_plano_de_treino"("p_aluno_id" "uuid", "p_nome_programa" "text", "p_objetivo" "text", "p_frequencia" integer, "p_programas_json" "jsonb") TO "service_role";
@@ -5914,6 +5939,12 @@ GRANT ALL ON TABLE "public"."processed_webhook_messages" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."program_workouts" TO "anon";
+GRANT ALL ON TABLE "public"."program_workouts" TO "authenticated";
+GRANT ALL ON TABLE "public"."program_workouts" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."prompts_sistema" TO "anon";
 GRANT ALL ON TABLE "public"."prompts_sistema" TO "authenticated";
 GRANT ALL ON TABLE "public"."prompts_sistema" TO "service_role";
@@ -6088,6 +6119,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict o1kBH3Sft6cIBdsJSYgnDbPUzWILykPW5w5IABCqjSycXsoWLsz3HdVliCezjGd
+\unrestrict LN7MklLdhFJymTT2rd2hRR8s0H9sq9LZHwHjpHMs9esZLHY64qiOpAMg0HyUm6A
 
 RESET ALL;
