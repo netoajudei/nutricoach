@@ -1,0 +1,4 @@
+Salvar esquema de banco de dados 
+
+supabase db dump --linked -f nutricoach_10-10v7.sql
+

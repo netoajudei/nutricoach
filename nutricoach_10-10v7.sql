@@ -1,5 +1,5 @@
 
-\restrict 2A36RsrTOn0sOFlI9TdMPaCMVTITYbwkb6aw8I4QVlQxxMCNYOuyz5YuDqfOGio
+\restrict TaZrCZMzBbcIcwyDmfFwLRdAAWRAxr9RJQe0GgeTaHeWtX3wGfOj6MbifsMbupC
 
 
 SET statement_timeout = 0;
@@ -64,6 +64,36 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+
+
+
+CREATE TYPE "public"."tipo_profissional" AS ENUM (
+    'nutricionista',
+    'personal',
+    'master'
+);
+
+
+ALTER TYPE "public"."tipo_profissional" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."tipo_profissional" IS 'Tipo de especialidade: nutricionista, personal ou master (nutri+personal)';
+
+
+
+CREATE TYPE "public"."user_role" AS ENUM (
+    'aluno',
+    'nutricionista',
+    'personal',
+    'master',
+    'dev'
+);
+
+
+ALTER TYPE "public"."user_role" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."user_role" IS 'Papéis disponíveis: aluno (padrão), nutricionista, personal, master (nutri+personal), dev (acesso total)';
 
 
 
@@ -678,6 +708,44 @@ $$;
 ALTER FUNCTION "public"."cleanup_old_processed_messages"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") RETURNS character varying
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_codigo VARCHAR(20);
+    v_role user_role;
+    v_prefixo TEXT;
+BEGIN
+    -- Busca o role do profissional para definir prefixo
+    SELECT role INTO v_role FROM alunos WHERE id = p_profissional_id;
+    
+    -- Define prefixo baseado no role
+    v_prefixo := CASE 
+        WHEN v_role = 'nutricionista' THEN 'NUTRI'
+        WHEN v_role = 'personal' THEN 'FIT'
+        WHEN v_role = 'master' THEN 'COACH'
+        ELSE 'TEAM'
+    END;
+    
+    -- Gera código único
+    v_codigo := gerar_codigo_convite(v_prefixo);
+    
+    -- Insere convite
+    INSERT INTO convites_alunos (aluno_id, profissional_id, codigo)
+    VALUES (p_aluno_id, p_profissional_id, v_codigo);
+    
+    RETURN v_codigo;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") IS 'Cria convite automaticamente ao cadastrar novo aluno. Retorna o código gerado.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."cron_rebuild_all_prompts"() RETURNS "text"
     LANGUAGE "plpgsql"
     AS $$
@@ -711,6 +779,34 @@ $$;
 
 
 ALTER FUNCTION "public"."cron_rebuild_all_prompts"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    UPDATE aluno_profissional
+    SET 
+        is_active = false,
+        data_fim = CURRENT_DATE,
+        observacoes = COALESCE(observacoes || E'\n', '') || 
+                      'Desativado em ' || CURRENT_DATE::TEXT || 
+                      CASE WHEN p_motivo IS NOT NULL 
+                           THEN ': ' || p_motivo 
+                           ELSE '' 
+                      END,
+        updated_at = NOW()
+    WHERE id = p_vinculo_id
+      AND is_active = true;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") IS 'Desativa um vínculo aluno-profissional, registrando data_fim e motivo';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") RETURNS TABLE("status_code" integer, "response_body" "text")
@@ -762,6 +858,37 @@ $$;
 
 
 ALTER FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text" DEFAULT 'NUTRI'::"text") RETURNS character varying
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+    v_codigo VARCHAR(20);
+    v_existe BOOLEAN;
+BEGIN
+    LOOP
+        -- Gera código: NUTRI-A7B9C (tipo + 5 caracteres alfanuméricos)
+        v_codigo := p_tipo_profissional || '-' || 
+                    UPPER(SUBSTRING(MD5(RANDOM()::TEXT || CLOCK_TIMESTAMP()::TEXT) FROM 1 FOR 5));
+        
+        -- Verifica se já existe
+        SELECT EXISTS(SELECT 1 FROM convites_alunos WHERE codigo = v_codigo) INTO v_existe;
+        
+        -- Se não existe, retorna
+        IF NOT v_existe THEN
+            RETURN v_codigo;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text") IS 'Gera código único para convite. Exemplo: NUTRI-A7B9C, FIT-X3Y8Z';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") RETURNS "void"
@@ -827,6 +954,63 @@ ALTER FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") OWNER TO "
 
 COMMENT ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") IS 'Analisa o progresso recente de um aluno (peso, treinos, dieta) e insere novos registros na tabela `achievements` se marcos forem atingidos.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."get_aluno_chart_data"("p_aluno_id" "uuid") RETURNS json
+    LANGUAGE "sql" STABLE
+    AS $$
+  -- Agrega todos os resultados em um único array JSON
+  SELECT json_agg(t) 
+  FROM (
+    
+    -- Início da subconsulta
+    SELECT
+      -- ==================================================
+      -- AQUI ESTÁ A ÚNICA ALTERAÇÃO
+      -- ==================================================
+      -- Converte a data para um timestamp completo (ISO 8601)
+      -- Ex: "2025-11-07T00:00:00+00:00"
+      data_medicao::timestamptz AS "data",
+      -- ==================================================
+      
+      peso_kg AS "peso",
+      
+      -- Lógica do delta (da versão anterior)
+      FIRST_VALUE(peso_kg) OVER (
+          ORDER BY data_medicao ASC, created_at ASC
+      ) AS "peso_inicial",
+      
+      ROUND(
+        peso_kg - FIRST_VALUE(peso_kg) OVER (ORDER BY data_medicao ASC, created_at ASC),
+        2
+      ) AS "delta_peso_total",
+    
+      -- Outros dados
+      percentual_gordura AS "gordura",
+      circunferencia_peito_cm AS "peito",
+      circunferencia_cintura_cm AS "cintura",
+      circunferencia_quadril_cm AS "quadril",
+      (medidas_json ->> 'coxa_dir')::numeric AS "coxa_direita",
+      (medidas_json ->> 'coxa_esq')::numeric AS "coxa_esquerda",
+      (medidas_json ->> 'panturrilha_dir')::numeric AS "panturrilha_direita",
+      (medidas_json ->> 'panturrilha_esq')::numeric AS "panturrilha_esquerda",
+      (medidas_json ->> 'braco_dir')::numeric AS "braco_direito",
+      (medidas_json ->> 'braco_esq')::numeric AS "braco_esquerdo"
+      
+    FROM
+      public.body_metrics
+    WHERE
+      aluno_id = p_aluno_id
+      
+    -- Ordenação final
+    ORDER BY
+      data_medicao ASC
+  
+  ) t; -- Fim da subconsulta
+$$;
+
+
+ALTER FUNCTION "public"."get_aluno_chart_data"("p_aluno_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_current_aluno_id"() RETURNS "uuid"
@@ -900,6 +1084,48 @@ $$;
 
 
 ALTER FUNCTION "public"."get_exercicios_template_json"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_food_items_template"() RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    AS $$
+  -- 1. Agrega o resultado final em um único array JSON
+  SELECT jsonb_agg(categorias)
+  FROM (
+    -- 2. Subconsulta: Agrupa os itens por categoria
+    SELECT
+      categoria,
+      -- 3. Cria um array JSON para os itens de cada categoria
+      json_agg(
+        json_build_object(
+          'id', id,
+          'nome', nome
+        ) ORDER BY nome ASC -- Ordena os alimentos em ordem alfabética
+      ) AS items
+    FROM
+      public.food_items
+    GROUP BY
+      categoria
+    ORDER BY
+      -- 4. Define uma ordem manual para as categorias aparecerem no frontend
+      CASE categoria
+        WHEN 'Proteínas' THEN 1
+        WHEN 'Carboidratos' THEN 2
+        WHEN 'Gorduras, Nozes e Sementes' THEN 3
+        WHEN 'Laticínios' THEN 4
+        WHEN 'Frutas' THEN 5
+        WHEN 'Vegetais e Legumes' THEN 6
+        ELSE 7
+      END
+  ) AS categorias; -- Alias da subconsulta
+$$;
+
+
+ALTER FUNCTION "public"."get_food_items_template"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."get_food_items_template"() IS 'Retorna um array JSONB com todos os food_items agrupados por categoria.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."get_full_workout_program_json"("p_program_id" "uuid") RETURNS "jsonb"
@@ -2396,6 +2622,36 @@ COMMENT ON FUNCTION "public"."rebuild_saude_e_rotina_json"("p_aluno_id" "uuid") 
 
 
 
+CREATE OR REPLACE FUNCTION "public"."refresh_nutricao_views"() RETURNS "text"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    RAISE NOTICE '[Refresh Views] Iniciando atualização das views de nutrição...';
+    
+    -- Atualiza view diária
+    REFRESH MATERIALIZED VIEW CONCURRENTLY vw_nutricao_resumo_diario;
+    RAISE NOTICE '[Refresh Views] ✅ vw_nutricao_resumo_diario atualizada';
+    
+    -- Atualiza view semanal
+    REFRESH MATERIALIZED VIEW CONCURRENTLY vw_nutricao_resumo_semanal;
+    RAISE NOTICE '[Refresh Views] ✅ vw_nutricao_resumo_semanal atualizada';
+    
+    -- Atualiza view mensal
+    REFRESH MATERIALIZED VIEW CONCURRENTLY vw_nutricao_resumo_mensal;
+    RAISE NOTICE '[Refresh Views] ✅ vw_nutricao_resumo_mensal atualizada';
+    
+    RETURN 'Todas as views de nutrição foram atualizadas com sucesso em ' || NOW()::TEXT;
+    
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '[Refresh Views] ❌ Erro ao atualizar views: %', SQLERRM;
+    RETURN 'Erro: ' || SQLERRM;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."refresh_nutricao_views"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", "p_nome_treino" "text" DEFAULT NULL::"text", "p_descricao_atividade" "text" DEFAULT NULL::"text", "p_duracao_minutos" integer DEFAULT NULL::integer, "p_observacoes" "text" DEFAULT NULL::"text", "p_data_treino" "date" DEFAULT CURRENT_DATE) RETURNS TABLE("execution_id" "uuid", "program_workout_id" "uuid", "nome_treino" "text", "mensagem" "text")
     LANGUAGE "plpgsql"
     AS $$
@@ -2744,6 +3000,22 @@ $$;
 ALTER FUNCTION "public"."testar_proposta_carga"("p_aluno_id" "uuid", "p_nome_exercicio" "text", "p_variacao_kg" numeric) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."trigger_convite_ativado"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    IF NEW.status = 'ativado' AND OLD.status = 'pendente' THEN
+        -- Atualiza o timestamp do aluno
+        UPDATE alunos SET updated_at = NOW() WHERE id = NEW.aluno_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."trigger_convite_ativado"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -2759,6 +3031,30 @@ ALTER FUNCTION "public"."update_updated_at_column"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "public"."update_updated_at_column"() IS 'Função trigger genérica que atualiza automaticamente o campo updated_at para NOW() em qualquer UPDATE.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."validate_profissional_role"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+    v_role user_role;
+BEGIN
+    -- Busca o role do profissional
+    SELECT role INTO v_role
+    FROM alunos
+    WHERE id = NEW.profissional_id;
+    
+    -- Valida se é um profissional válido
+    IF v_role NOT IN ('nutricionista', 'personal', 'master', 'dev') THEN
+        RAISE EXCEPTION 'Profissional deve ter role nutricionista, personal, master ou dev. Role atual: %', v_role;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."validate_profissional_role"() OWNER TO "postgres";
 
 SET default_tablespace = '';
 
@@ -2800,6 +3096,57 @@ COMMENT ON COLUMN "public"."achievements"."categoria" IS 'Categoria da conquista
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."aluno_profissional" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "aluno_id" "uuid" NOT NULL,
+    "profissional_id" "uuid" NOT NULL,
+    "tipo_profissional" "public"."tipo_profissional" NOT NULL,
+    "data_inicio" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "data_fim" "date",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "observacoes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_aluno_diferente_profissional" CHECK (("aluno_id" <> "profissional_id")),
+    CONSTRAINT "chk_data_fim_maior" CHECK ((("data_fim" IS NULL) OR ("data_fim" > "data_inicio")))
+);
+
+
+ALTER TABLE "public"."aluno_profissional" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."aluno_profissional" IS 'Relacionamento N:N entre alunos e profissionais (nutricionistas/personals). Mantém histórico de vínculos.';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."aluno_id" IS 'ID do aluno sendo atendido';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."profissional_id" IS 'ID do profissional (deve ter role adequada)';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."tipo_profissional" IS 'Especialidade do atendimento: nutricionista ou personal';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."data_inicio" IS 'Data de início do vínculo';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."data_fim" IS 'Data de término do vínculo (NULL = ainda ativo)';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."is_active" IS 'Indica se o vínculo está ativo no momento';
+
+
+
+COMMENT ON COLUMN "public"."aluno_profissional"."observacoes" IS 'Observações sobre o vínculo (motivo de término, etc)';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."alunos" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "nome_completo" character varying(255) NOT NULL,
@@ -2813,7 +3160,8 @@ CREATE TABLE IF NOT EXISTS "public"."alunos" (
     "auth_user_id" "uuid",
     "email" character varying(255),
     "avatar_url" "text",
-    "is_onboarding_complete" boolean DEFAULT false
+    "is_onboarding_complete" boolean DEFAULT false,
+    "role" "public"."user_role" DEFAULT 'aluno'::"public"."user_role" NOT NULL
 );
 
 
@@ -2836,6 +3184,10 @@ COMMENT ON COLUMN "public"."alunos"."agregacao_agendada" IS 'Flag booleana que i
 
 
 
+COMMENT ON COLUMN "public"."alunos"."role" IS 'Papel do usuário no sistema. Define permissões e acesso a funcionalidades.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."body_metrics" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
@@ -2852,6 +3204,7 @@ CREATE TABLE IF NOT EXISTS "public"."body_metrics" (
     "feedback_subjetivo" "jsonb",
     "circunferencia_peito_cm" numeric(5,2),
     "medidas_json" "jsonb",
+    "registrado_por_profissional_id" "uuid",
     CONSTRAINT "body_metrics_altura_cm_check" CHECK ((("altura_cm" > (0)::numeric) AND ("altura_cm" < (300)::numeric))),
     CONSTRAINT "body_metrics_circunferencia_cintura_cm_check" CHECK ((("circunferencia_cintura_cm" > (0)::numeric) AND ("circunferencia_cintura_cm" < (200)::numeric))),
     CONSTRAINT "body_metrics_circunferencia_pescoco_cm_check" CHECK ((("circunferencia_pescoco_cm" > (0)::numeric) AND ("circunferencia_pescoco_cm" < (100)::numeric))),
@@ -2877,6 +3230,10 @@ COMMENT ON COLUMN "public"."body_metrics"."circunferencia_peito_cm" IS 'Medida d
 
 
 COMMENT ON COLUMN "public"."body_metrics"."medidas_json" IS 'JSON para armazenar medidas corporais secundárias (ex: braços, coxas, panturrilhas).';
+
+
+
+COMMENT ON COLUMN "public"."body_metrics"."registrado_por_profissional_id" IS 'ID do profissional que registrou esta medição (NULL = auto-registro do aluno)';
 
 
 
@@ -2983,6 +3340,56 @@ SELECT valor INTO v_key FROM config_sistema WHERE chave = ''service_role_key'';'
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."convites_alunos" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "aluno_id" "uuid" NOT NULL,
+    "profissional_id" "uuid" NOT NULL,
+    "codigo" character varying(20) NOT NULL,
+    "status" character varying(20) DEFAULT 'pendente'::character varying NOT NULL,
+    "data_criacao" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "data_ativacao" timestamp with time zone,
+    "expira_em" timestamp with time zone DEFAULT ("now"() + '7 days'::interval) NOT NULL,
+    "whatsapp_ativado" character varying(20),
+    "tentativas_uso" integer DEFAULT 0,
+    CONSTRAINT "chk_convite_status" CHECK ((("status")::"text" = ANY ((ARRAY['pendente'::character varying, 'ativado'::character varying, 'expirado'::character varying, 'cancelado'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."convites_alunos" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."convites_alunos" IS 'Convites para ativação de alunos via WhatsApp. Gerados pelo profissional ao criar o perfil do aluno.';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."aluno_id" IS 'ID do aluno que será ativado com este convite';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."profissional_id" IS 'ID do profissional que gerou o convite';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."codigo" IS 'Código único que o aluno envia no WhatsApp (ex: NUTRI-A7B9C)';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."status" IS 'Status: pendente, ativado, expirado, cancelado';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."expira_em" IS 'Data de expiração do convite (padrão: 7 dias)';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."whatsapp_ativado" IS 'Número de WhatsApp usado na ativação';
+
+
+
+COMMENT ON COLUMN "public"."convites_alunos"."tentativas_uso" IS 'Contador de tentativas de uso (anti-spam)';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."daily_consumption_history" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
@@ -3073,7 +3480,8 @@ CREATE TABLE IF NOT EXISTS "public"."diet_plans" (
     "data_fim" "date",
     "notas" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "criado_por_profissional_id" "uuid"
 );
 
 
@@ -3081,6 +3489,10 @@ ALTER TABLE "public"."diet_plans" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."diet_plans" IS 'Planos alimentares personalizados e versionados para cada aluno';
+
+
+
+COMMENT ON COLUMN "public"."diet_plans"."criado_por_profissional_id" IS 'ID do profissional (nutricionista/master) que criou este plano alimentar';
 
 
 
@@ -3197,6 +3609,30 @@ ALTER SEQUENCE "public"."exercicios_template_id_seq" OWNED BY "public"."exercici
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."food_items" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "categoria" "text" NOT NULL,
+    "nome" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."food_items" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."food_items" IS 'Tabela mestre (template) de todos os alimentos para seleção de preferências (Gosta/Não Gosta).';
+
+
+
+COMMENT ON COLUMN "public"."food_items"."categoria" IS 'Categoria do alimento (ex: Frutas, Legumes, Carnes, Laticínios).';
+
+
+
+COMMENT ON COLUMN "public"."food_items"."nome" IS 'Nome do alimento (ex: Maçã, Alface, Peito de Frango).';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."funcoes_ia" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "nome_funcao" "text" NOT NULL,
@@ -3253,6 +3689,7 @@ CREATE TABLE IF NOT EXISTS "public"."goals" (
     "unidade" "text",
     "ciclo_dias" integer,
     "frequencia_no_ciclo" integer,
+    "criado_por_profissional_id" "uuid",
     CONSTRAINT "goals_target_peso_kg_check" CHECK ((("valor_meta" > (0)::numeric) AND ("valor_meta" < (300)::numeric)))
 );
 
@@ -3288,6 +3725,10 @@ COMMENT ON COLUMN "public"."goals"."frequencia_no_ciclo" IS 'Para metas cíclica
 
 
 
+COMMENT ON COLUMN "public"."goals"."criado_por_profissional_id" IS 'ID do profissional que definiu esta meta para o aluno';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."historico_atualizacoes_exercicio" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
@@ -3309,7 +3750,8 @@ CREATE TABLE IF NOT EXISTS "public"."instrucoes_nutricionista" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "instrucoes_da_ia" "text",
     "logs_ia" "jsonb",
-    "conversation_id" "text"
+    "conversation_id" "text",
+    "criado_por_profissional_id" "uuid"
 );
 
 
@@ -3332,6 +3774,10 @@ COMMENT ON COLUMN "public"."instrucoes_nutricionista"."logs_ia" IS 'Log de dados
 
 
 
+COMMENT ON COLUMN "public"."instrucoes_nutricionista"."criado_por_profissional_id" IS 'ID do nutricionista que criou estas instruções';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."instrucoes_personal" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "aluno_id" "uuid" NOT NULL,
@@ -3339,7 +3785,8 @@ CREATE TABLE IF NOT EXISTS "public"."instrucoes_personal" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "instrucoes_da_ia" "text",
     "logs_ia" "jsonb",
-    "conversation_id" "text"
+    "conversation_id" "text",
+    "criado_por_profissional_id" "uuid"
 );
 
 
@@ -3359,6 +3806,10 @@ COMMENT ON COLUMN "public"."instrucoes_personal"."instrucoes_da_ia" IS 'Sugestã
 
 
 COMMENT ON COLUMN "public"."instrucoes_personal"."logs_ia" IS 'Log de dados brutos (JSON) das análises da IA para auditoria e "legado".';
+
+
+
+COMMENT ON COLUMN "public"."instrucoes_personal"."criado_por_profissional_id" IS 'ID do personal trainer que criou estas instruções';
 
 
 
@@ -3816,6 +4267,68 @@ COMMENT ON VIEW "public"."vw_aluno_completo" IS 'View que combina dados do aluno
 
 
 
+CREATE OR REPLACE VIEW "public"."vw_alunos_por_profissional" AS
+ WITH "vinculos_agregados" AS (
+         SELECT "aluno_profissional"."profissional_id",
+            "aluno_profissional"."aluno_id",
+            "array_agg"(DISTINCT "aluno_profissional"."tipo_profissional" ORDER BY "aluno_profissional"."tipo_profissional") AS "tipos_atendimento",
+            "max"(
+                CASE
+                    WHEN "aluno_profissional"."is_active" THEN "aluno_profissional"."data_inicio"
+                    ELSE NULL::"date"
+                END) AS "data_inicio",
+            "max"(
+                CASE
+                    WHEN "aluno_profissional"."is_active" THEN "aluno_profissional"."data_fim"
+                    ELSE NULL::"date"
+                END) AS "data_fim",
+            "bool_or"("aluno_profissional"."is_active") AS "is_active",
+            "string_agg"(DISTINCT "aluno_profissional"."observacoes", '; '::"text") AS "observacoes"
+           FROM "public"."aluno_profissional"
+          WHERE ("aluno_profissional"."is_active" = true)
+          GROUP BY "aluno_profissional"."profissional_id", "aluno_profissional"."aluno_id"
+        )
+ SELECT "va"."profissional_id",
+    "va"."aluno_id",
+    "prof"."nome_completo" AS "profissional_nome",
+    "prof"."email" AS "profissional_email",
+    "prof"."whatsapp" AS "profissional_whatsapp",
+    "prof"."role" AS "profissional_role",
+    "a"."nome_completo" AS "aluno_nome",
+    "a"."email" AS "aluno_email",
+    "a"."whatsapp" AS "aluno_whatsapp",
+    "a"."avatar_url" AS "aluno_avatar",
+    "a"."subscription_status",
+    "a"."is_onboarding_complete",
+    "a"."created_at" AS "aluno_cadastrado_em",
+    "a"."last_interaction_at" AS "aluno_ultima_interacao",
+    "va"."tipos_atendimento",
+    "va"."data_inicio" AS "vinculo_inicio",
+    "va"."data_fim" AS "vinculo_fim",
+    "va"."is_active" AS "vinculo_ativo",
+    "va"."observacoes" AS "vinculo_observacoes",
+    "c"."codigo" AS "codigo_convite",
+    "c"."status" AS "status_convite",
+    "c"."data_ativacao" AS "convite_ativado_em"
+   FROM ((("vinculos_agregados" "va"
+     JOIN "public"."alunos" "a" ON (("va"."aluno_id" = "a"."id")))
+     JOIN "public"."alunos" "prof" ON (("va"."profissional_id" = "prof"."id")))
+     LEFT JOIN LATERAL ( SELECT "convites_alunos"."codigo",
+            "convites_alunos"."status",
+            "convites_alunos"."data_ativacao"
+           FROM "public"."convites_alunos"
+          WHERE (("convites_alunos"."aluno_id" = "a"."id") AND ("convites_alunos"."profissional_id" = "prof"."id"))
+          ORDER BY "convites_alunos"."data_criacao" DESC
+         LIMIT 1) "c" ON (true));
+
+
+ALTER VIEW "public"."vw_alunos_por_profissional" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."vw_alunos_por_profissional" IS 'Lista todos os alunos ativos de cada profissional com dados completos do vínculo';
+
+
+
 CREATE OR REPLACE VIEW "public"."vw_completions_aguardando_processamento" AS
  SELECT "c"."id",
     "c"."aluno_id",
@@ -3884,6 +4397,81 @@ ALTER MATERIALIZED VIEW "public"."vw_metricas_diarias_por_aluno" OWNER TO "postg
 
 COMMENT ON MATERIALIZED VIEW "public"."vw_metricas_diarias_por_aluno" IS 'Visão materializada que consolida diariamente o uso de tokens e calcula o custo detalhado (input, output, cache) para cada aluno.';
 
+
+
+CREATE OR REPLACE VIEW "public"."vw_metricas_hoje_por_aluno" AS
+ SELECT "a"."id" AS "aluno_id",
+    "a"."nome_completo" AS "nome_aluno",
+    CURRENT_DATE AS "data",
+    "count"(*) AS "total_chamadas",
+    "sum"("um"."input_tokens") AS "total_input_tokens",
+    "sum"("um"."output_tokens") AS "total_output_tokens",
+    COALESCE("sum"("um"."cached_tokens"), (0)::bigint) AS "total_cached_tokens",
+    ("sum"("um"."input_tokens") - COALESCE("sum"("um"."cached_tokens"), (0)::bigint)) AS "input_tokens_faturados",
+    (((((("sum"("um"."input_tokens") - COALESCE("sum"("um"."cached_tokens"), (0)::bigint)))::numeric * 2.0) / (1000000)::numeric) + ((("sum"("um"."output_tokens"))::numeric * 12.0) / (1000000)::numeric)) + (((COALESCE("sum"("um"."cached_tokens"), (0)::bigint))::numeric * 0.15) / (1000000)::numeric)) AS "gasto_diario_usd"
+   FROM ("public"."usage_metrics" "um"
+     JOIN "public"."alunos" "a" ON (("um"."aluno_id" = "a"."id")))
+  WHERE ("date"("um"."created_at") = CURRENT_DATE)
+  GROUP BY "a"."id", "a"."nome_completo"
+  ORDER BY CURRENT_DATE DESC, "a"."nome_completo";
+
+
+ALTER VIEW "public"."vw_metricas_hoje_por_aluno" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "public"."vw_nutricao_hoje_por_aluno" AS
+ WITH "daily_data" AS (
+         SELECT "daily_consumption_history"."aluno_id",
+            "daily_consumption_history"."data_registro",
+            "sum"("daily_consumption_history"."consumo_calorias") AS "total_calorias_consumidas",
+            "sum"("daily_consumption_history"."consumo_proteina") AS "total_proteina_consumida",
+            "sum"("daily_consumption_history"."consumo_carboidrato") AS "total_carboidrato_consumido",
+            "sum"("daily_consumption_history"."consumo_gordura") AS "total_gordura_consumida",
+            "sum"("daily_consumption_history"."consumo_agua_ml") AS "total_agua_consumida"
+           FROM "public"."daily_consumption_history"
+          WHERE (("daily_consumption_history"."data_registro" = ((CURRENT_DATE AT TIME ZONE 'America/Sao_Paulo'::"text"))::"date") AND ("daily_consumption_history"."confirmada" = true))
+          GROUP BY "daily_consumption_history"."aluno_id", "daily_consumption_history"."data_registro"
+        )
+ SELECT "a"."id" AS "aluno_id",
+    "a"."nome_completo" AS "nome_aluno",
+    "d"."data_registro",
+    (("dp"."meta_diaria_geral" ->> 'calorias'::"text"))::numeric AS "meta_calorias",
+    (("dp"."meta_diaria_geral" ->> 'proteinas'::"text"))::numeric AS "meta_proteina",
+    (("dp"."meta_diaria_geral" ->> 'carboidratos'::"text"))::numeric AS "meta_carboidratos",
+    (("dp"."meta_diaria_geral" ->> 'gorduras'::"text"))::numeric AS "meta_gorduras",
+    (("dp"."meta_diaria_geral" ->> 'agua_ml'::"text"))::numeric AS "meta_agua_ml",
+    COALESCE("d"."total_calorias_consumidas", (0)::bigint) AS "total_calorias_consumidas",
+    COALESCE("d"."total_proteina_consumida", (0)::bigint) AS "total_proteina_consumida",
+    COALESCE("d"."total_carboidrato_consumido", (0)::bigint) AS "total_carboidrato_consumido",
+    COALESCE("d"."total_gordura_consumida", (0)::bigint) AS "total_gordura_consumida",
+    COALESCE("d"."total_agua_consumida", (0)::bigint) AS "total_agua_consumida",
+        CASE
+            WHEN ((("dp"."meta_diaria_geral" ->> 'calorias'::"text"))::numeric > (0)::numeric) THEN "round"((((COALESCE("d"."total_calorias_consumidas", (0)::bigint))::numeric / (("dp"."meta_diaria_geral" ->> 'calorias'::"text"))::numeric) * (100)::numeric))
+            ELSE (0)::numeric
+        END AS "percentual_calorias",
+        CASE
+            WHEN ((("dp"."meta_diaria_geral" ->> 'proteinas'::"text"))::numeric > (0)::numeric) THEN "round"((((COALESCE("d"."total_proteina_consumida", (0)::bigint))::numeric / (("dp"."meta_diaria_geral" ->> 'proteinas'::"text"))::numeric) * (100)::numeric))
+            ELSE (0)::numeric
+        END AS "percentual_proteina",
+        CASE
+            WHEN ((("dp"."meta_diaria_geral" ->> 'carboidratos'::"text"))::numeric > (0)::numeric) THEN "round"((((COALESCE("d"."total_carboidrato_consumido", (0)::bigint))::numeric / (("dp"."meta_diaria_geral" ->> 'carboidratos'::"text"))::numeric) * (100)::numeric))
+            ELSE (0)::numeric
+        END AS "percentual_carboidratos",
+        CASE
+            WHEN ((("dp"."meta_diaria_geral" ->> 'gorduras'::"text"))::numeric > (0)::numeric) THEN "round"((((COALESCE("d"."total_gordura_consumida", (0)::bigint))::numeric / (("dp"."meta_diaria_geral" ->> 'gorduras'::"text"))::numeric) * (100)::numeric))
+            ELSE (0)::numeric
+        END AS "percentual_gorduras",
+        CASE
+            WHEN ((("dp"."meta_diaria_geral" ->> 'agua_ml'::"text"))::numeric > (0)::numeric) THEN "round"((((COALESCE("d"."total_agua_consumida", (0)::bigint))::numeric / (("dp"."meta_diaria_geral" ->> 'agua_ml'::"text"))::numeric) * (100)::numeric))
+            ELSE (0)::numeric
+        END AS "percentual_agua"
+   FROM (("public"."alunos" "a"
+     LEFT JOIN "daily_data" "d" ON (("a"."id" = "d"."aluno_id")))
+     LEFT JOIN "public"."diet_plans" "dp" ON ((("a"."id" = "dp"."aluno_id") AND ("dp"."is_active" = true))))
+  WHERE ("dp"."id" IS NOT NULL);
+
+
+ALTER VIEW "public"."vw_nutricao_hoje_por_aluno" OWNER TO "postgres";
 
 
 CREATE MATERIALIZED VIEW "public"."vw_nutricao_resumo_diario" AS
@@ -4214,7 +4802,8 @@ CREATE TABLE IF NOT EXISTS "public"."workout_programs" (
     "data_inicio" "date" DEFAULT CURRENT_DATE NOT NULL,
     "data_fim" "date",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "criado_por_profissional_id" "uuid"
 );
 
 
@@ -4226,6 +4815,10 @@ COMMENT ON TABLE "public"."workout_programs" IS 'Tabela mestre para um programa 
 
 
 COMMENT ON COLUMN "public"."workout_programs"."nome_programa" IS 'Nome do programa (ex: "Hipertrofia Upper/Lower 4x").';
+
+
+
+COMMENT ON COLUMN "public"."workout_programs"."criado_por_profissional_id" IS 'ID do profissional (nutricionista/personal/master) que criou este programa de treino';
 
 
 
@@ -4398,7 +4991,8 @@ CREATE TABLE IF NOT EXISTS "public"."workout_exercises" (
     "descanso_segundos" smallint,
     "observacoes" "text",
     "exercicio_template_id" integer,
-    "grupo_muscular" "text"
+    "grupo_muscular" "text",
+    "ativo" boolean DEFAULT true NOT NULL
 );
 
 
@@ -4418,6 +5012,10 @@ COMMENT ON COLUMN "public"."workout_exercises"."exercicio_template_id" IS 'FK pa
 
 
 COMMENT ON COLUMN "public"."workout_exercises"."grupo_muscular" IS 'Dado desnormalizado (copiado do template) para otimizar queries rápidas do chatbot, evitando joins.';
+
+
+
+COMMENT ON COLUMN "public"."workout_exercises"."ativo" IS 'Indica se o exercício está ativo no programa. FALSE quando substituído por outro.';
 
 
 
@@ -4455,6 +5053,11 @@ ALTER TABLE ONLY "public"."achievements"
 
 
 
+ALTER TABLE ONLY "public"."aluno_profissional"
+    ADD CONSTRAINT "aluno_profissional_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."alunos"
     ADD CONSTRAINT "alunos_pkey" PRIMARY KEY ("id");
 
@@ -4482,6 +5085,16 @@ ALTER TABLE ONLY "public"."completions_old"
 
 ALTER TABLE ONLY "public"."config_sistema"
     ADD CONSTRAINT "config_sistema_pkey" PRIMARY KEY ("chave");
+
+
+
+ALTER TABLE ONLY "public"."convites_alunos"
+    ADD CONSTRAINT "convites_alunos_codigo_key" UNIQUE ("codigo");
+
+
+
+ALTER TABLE ONLY "public"."convites_alunos"
+    ADD CONSTRAINT "convites_alunos_pkey" PRIMARY KEY ("id");
 
 
 
@@ -4527,6 +5140,16 @@ ALTER TABLE ONLY "public"."exercicios_template"
 
 ALTER TABLE ONLY "public"."exercicios_template"
     ADD CONSTRAINT "exercicios_template_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."food_items"
+    ADD CONSTRAINT "food_items_categoria_nome_key" UNIQUE ("categoria", "nome");
+
+
+
+ALTER TABLE ONLY "public"."food_items"
+    ADD CONSTRAINT "food_items_pkey" PRIMARY KEY ("id");
 
 
 
@@ -4679,6 +5302,26 @@ CREATE UNIQUE INDEX "alunos_whatsapp_unique_idx" ON "public"."alunos" USING "btr
 
 
 
+CREATE INDEX "idx_aluno_profissional_active" ON "public"."aluno_profissional" USING "btree" ("is_active") WHERE ("is_active" = true);
+
+
+
+CREATE INDEX "idx_aluno_profissional_aluno" ON "public"."aluno_profissional" USING "btree" ("aluno_id");
+
+
+
+CREATE INDEX "idx_aluno_profissional_profissional" ON "public"."aluno_profissional" USING "btree" ("profissional_id");
+
+
+
+CREATE INDEX "idx_aluno_profissional_tipo" ON "public"."aluno_profissional" USING "btree" ("tipo_profissional");
+
+
+
+CREATE UNIQUE INDEX "idx_aluno_profissional_unique_active" ON "public"."aluno_profissional" USING "btree" ("aluno_id", "profissional_id", "tipo_profissional") WHERE ("is_active" = true);
+
+
+
 CREATE INDEX "idx_alunos_aguardando" ON "public"."alunos" USING "btree" ((("aguardando_confirmacao" ->> 'aguardando'::"text")));
 
 
@@ -4695,6 +5338,10 @@ CREATE INDEX "idx_alunos_email" ON "public"."alunos" USING "btree" ("email") WHE
 
 
 
+CREATE INDEX "idx_alunos_role" ON "public"."alunos" USING "btree" ("role");
+
+
+
 CREATE INDEX "idx_alunos_whatsapp" ON "public"."alunos" USING "btree" ("whatsapp");
 
 
@@ -4704,6 +5351,10 @@ CREATE INDEX "idx_body_metrics_aluno_id" ON "public"."body_metrics" USING "btree
 
 
 CREATE INDEX "idx_body_metrics_data_medicao" ON "public"."body_metrics" USING "btree" ("aluno_id", "data_medicao" DESC);
+
+
+
+CREATE INDEX "idx_body_metrics_profissional" ON "public"."body_metrics" USING "btree" ("registrado_por_profissional_id");
 
 
 
@@ -4732,6 +5383,26 @@ CREATE INDEX "idx_completions_nao_processados" ON "public"."completions_old" USI
 
 
 CREATE INDEX "idx_config_sistema_chave" ON "public"."config_sistema" USING "btree" ("chave");
+
+
+
+CREATE INDEX "idx_convites_aluno" ON "public"."convites_alunos" USING "btree" ("aluno_id");
+
+
+
+CREATE INDEX "idx_convites_codigo" ON "public"."convites_alunos" USING "btree" ("codigo");
+
+
+
+CREATE INDEX "idx_convites_expiracao" ON "public"."convites_alunos" USING "btree" ("expira_em") WHERE (("status")::"text" = 'pendente'::"text");
+
+
+
+CREATE INDEX "idx_convites_profissional" ON "public"."convites_alunos" USING "btree" ("profissional_id");
+
+
+
+CREATE INDEX "idx_convites_status" ON "public"."convites_alunos" USING "btree" ("status") WHERE (("status")::"text" = 'pendente'::"text");
 
 
 
@@ -4767,6 +5438,10 @@ CREATE UNIQUE INDEX "idx_diet_plans_one_active_per_aluno" ON "public"."diet_plan
 
 
 
+CREATE INDEX "idx_diet_plans_profissional" ON "public"."diet_plans" USING "btree" ("criado_por_profissional_id");
+
+
+
 CREATE INDEX "idx_diet_plans_version" ON "public"."diet_plans" USING "btree" ("aluno_id", "version" DESC);
 
 
@@ -4795,11 +5470,19 @@ CREATE UNIQUE INDEX "idx_dynamic_prompts_unique" ON "public"."dynamic_prompts_ol
 
 
 
+CREATE INDEX "idx_food_items_categoria" ON "public"."food_items" USING "btree" ("categoria");
+
+
+
 CREATE INDEX "idx_funcoes_ia_active" ON "public"."funcoes_ia" USING "btree" ("is_active") WHERE ("is_active" = true);
 
 
 
 CREATE INDEX "idx_goals_aluno_id" ON "public"."goals" USING "btree" ("aluno_id");
+
+
+
+CREATE INDEX "idx_goals_profissional" ON "public"."goals" USING "btree" ("criado_por_profissional_id");
 
 
 
@@ -4812,6 +5495,14 @@ CREATE INDEX "idx_historico_exercicio_id" ON "public"."historico_atualizacoes_ex
 
 
 CREATE INDEX "idx_historico_timestamp" ON "public"."historico_atualizacoes_exercicio" USING "btree" ("timestamp" DESC);
+
+
+
+CREATE INDEX "idx_instrucoes_nutricionista_profissional" ON "public"."instrucoes_nutricionista" USING "btree" ("criado_por_profissional_id");
+
+
+
+CREATE INDEX "idx_instrucoes_personal_profissional" ON "public"."instrucoes_personal" USING "btree" ("criado_por_profissional_id");
 
 
 
@@ -4840,6 +5531,18 @@ CREATE INDEX "idx_mensagens_temp_timestamp" ON "public"."mensagens_temporarias" 
 
 
 CREATE INDEX "idx_mensagens_temp_whatsapp" ON "public"."mensagens_temporarias" USING "btree" ("whatsapp");
+
+
+
+CREATE UNIQUE INDEX "idx_nutricao_diario_unique" ON "public"."vw_nutricao_resumo_diario" USING "btree" ("aluno_id", "data_registro");
+
+
+
+CREATE UNIQUE INDEX "idx_nutricao_mensal_unique" ON "public"."vw_nutricao_resumo_mensal" USING "btree" ("aluno_id", "mes_inicio");
+
+
+
+CREATE UNIQUE INDEX "idx_nutricao_semanal_unique" ON "public"."vw_nutricao_resumo_semanal" USING "btree" ("aluno_id", "semana_inicio");
 
 
 
@@ -4971,7 +5674,19 @@ CREATE INDEX "idx_workout_plans_version" ON "public"."workout_plans_old" USING "
 
 
 
+CREATE INDEX "idx_workout_programs_profissional" ON "public"."workout_programs" USING "btree" ("criado_por_profissional_id");
+
+
+
 CREATE UNIQUE INDEX "unique_active_goal_per_aluno" ON "public"."goals" USING "btree" ("aluno_id") WHERE (("status")::"text" = 'active'::"text");
+
+
+
+CREATE UNIQUE INDEX "vw_nutricao_resumo_diario_unique_idx" ON "public"."vw_nutricao_resumo_diario" USING "btree" ("aluno_id", "data_registro");
+
+
+
+CREATE OR REPLACE TRIGGER "after_convite_ativado" AFTER UPDATE ON "public"."convites_alunos" FOR EACH ROW EXECUTE FUNCTION "public"."trigger_convite_ativado"();
 
 
 
@@ -5023,7 +5738,19 @@ CREATE OR REPLACE TRIGGER "trigger_workout_programs_changes" AFTER INSERT OR DEL
 
 
 
+CREATE OR REPLACE TRIGGER "update_aluno_profissional_updated_at" BEFORE UPDATE ON "public"."aluno_profissional" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "update_food_items_updated_at" BEFORE UPDATE ON "public"."food_items" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
 CREATE OR REPLACE TRIGGER "update_workout_executions_updated_at" BEFORE UPDATE ON "public"."daily_workout_executions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "validate_profissional_role_trigger" BEFORE INSERT OR UPDATE ON "public"."aluno_profissional" FOR EACH ROW EXECUTE FUNCTION "public"."validate_profissional_role"();
 
 
 
@@ -5037,6 +5764,16 @@ ALTER TABLE ONLY "public"."achievements"
 
 
 
+ALTER TABLE ONLY "public"."aluno_profissional"
+    ADD CONSTRAINT "aluno_profissional_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."aluno_profissional"
+    ADD CONSTRAINT "aluno_profissional_profissional_id_fkey" FOREIGN KEY ("profissional_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."alunos"
     ADD CONSTRAINT "alunos_auth_user_id_fkey" FOREIGN KEY ("auth_user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
@@ -5047,8 +5784,23 @@ ALTER TABLE ONLY "public"."body_metrics"
 
 
 
+ALTER TABLE ONLY "public"."body_metrics"
+    ADD CONSTRAINT "body_metrics_registrado_por_profissional_id_fkey" FOREIGN KEY ("registrado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."completions_old"
     ADD CONSTRAINT "completions_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."convites_alunos"
+    ADD CONSTRAINT "convites_alunos_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."convites_alunos"
+    ADD CONSTRAINT "convites_alunos_profissional_id_fkey" FOREIGN KEY ("profissional_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
 
 
 
@@ -5077,6 +5829,11 @@ ALTER TABLE ONLY "public"."diet_plans"
 
 
 
+ALTER TABLE ONLY "public"."diet_plans"
+    ADD CONSTRAINT "diet_plans_criado_por_profissional_id_fkey" FOREIGN KEY ("criado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."dynamic_prompts_old"
     ADD CONSTRAINT "dynamic_prompts_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
 
@@ -5102,6 +5859,11 @@ ALTER TABLE ONLY "public"."goals"
 
 
 
+ALTER TABLE ONLY "public"."goals"
+    ADD CONSTRAINT "goals_criado_por_profissional_id_fkey" FOREIGN KEY ("criado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."historico_atualizacoes_exercicio"
     ADD CONSTRAINT "historico_atualizacoes_exercicio_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
 
@@ -5117,8 +5879,18 @@ ALTER TABLE ONLY "public"."instrucoes_nutricionista"
 
 
 
+ALTER TABLE ONLY "public"."instrucoes_nutricionista"
+    ADD CONSTRAINT "instrucoes_nutricionista_criado_por_profissional_id_fkey" FOREIGN KEY ("criado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."instrucoes_personal"
     ADD CONSTRAINT "instrucoes_personal_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instrucoes_personal"
+    ADD CONSTRAINT "instrucoes_personal_criado_por_profissional_id_fkey" FOREIGN KEY ("criado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
 
 
 
@@ -5199,6 +5971,11 @@ ALTER TABLE ONLY "public"."workout_plans_old"
 
 ALTER TABLE ONLY "public"."workout_programs"
     ADD CONSTRAINT "workout_programs_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."workout_programs"
+    ADD CONSTRAINT "workout_programs_criado_por_profissional_id_fkey" FOREIGN KEY ("criado_por_profissional_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
 
 
 
@@ -5548,9 +6325,21 @@ GRANT ALL ON FUNCTION "public"."cleanup_old_processed_messages"() TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."criar_convite_para_aluno"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "anon";
 GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "service_role";
 
 
 
@@ -5560,9 +6349,21 @@ GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "te
 
 
 
+GRANT ALL ON FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."gerar_conquistas_aluno"("p_aluno_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_aluno_chart_data"("p_aluno_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_aluno_chart_data"("p_aluno_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_aluno_chart_data"("p_aluno_id" "uuid") TO "service_role";
 
 
 
@@ -5581,6 +6382,12 @@ GRANT ALL ON FUNCTION "public"."get_diet_for_today"("p_plano_semanal" "jsonb") T
 GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "anon";
 GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_exercicios_template_json"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_food_items_template"() TO "anon";
+GRANT ALL ON FUNCTION "public"."get_food_items_template"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_food_items_template"() TO "service_role";
 
 
 
@@ -5710,6 +6517,12 @@ GRANT ALL ON FUNCTION "public"."rebuild_saude_e_rotina_json"("p_aluno_id" "uuid"
 
 
 
+GRANT ALL ON FUNCTION "public"."refresh_nutricao_views"() TO "anon";
+GRANT ALL ON FUNCTION "public"."refresh_nutricao_views"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."refresh_nutricao_views"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", "p_nome_treino" "text", "p_descricao_atividade" "text", "p_duracao_minutos" integer, "p_observacoes" "text", "p_data_treino" "date") TO "anon";
 GRANT ALL ON FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", "p_nome_treino" "text", "p_descricao_atividade" "text", "p_duracao_minutos" integer, "p_observacoes" "text", "p_data_treino" "date") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", "p_nome_treino" "text", "p_descricao_atividade" "text", "p_duracao_minutos" integer, "p_observacoes" "text", "p_data_treino" "date") TO "service_role";
@@ -5752,9 +6565,21 @@ GRANT ALL ON FUNCTION "public"."testar_proposta_carga"("p_aluno_id" "uuid", "p_n
 
 
 
+GRANT ALL ON FUNCTION "public"."trigger_convite_ativado"() TO "anon";
+GRANT ALL ON FUNCTION "public"."trigger_convite_ativado"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."trigger_convite_ativado"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "anon";
+GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "service_role";
 
 
 
@@ -5789,6 +6614,12 @@ GRANT ALL ON TABLE "public"."achievements" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."aluno_profissional" TO "anon";
+GRANT ALL ON TABLE "public"."aluno_profissional" TO "authenticated";
+GRANT ALL ON TABLE "public"."aluno_profissional" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."alunos" TO "anon";
 GRANT ALL ON TABLE "public"."alunos" TO "authenticated";
 GRANT ALL ON TABLE "public"."alunos" TO "service_role";
@@ -5816,6 +6647,12 @@ GRANT ALL ON TABLE "public"."completions_old" TO "service_role";
 GRANT ALL ON TABLE "public"."config_sistema" TO "anon";
 GRANT ALL ON TABLE "public"."config_sistema" TO "authenticated";
 GRANT ALL ON TABLE "public"."config_sistema" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."convites_alunos" TO "anon";
+GRANT ALL ON TABLE "public"."convites_alunos" TO "authenticated";
+GRANT ALL ON TABLE "public"."convites_alunos" TO "service_role";
 
 
 
@@ -5864,6 +6701,12 @@ GRANT ALL ON TABLE "public"."exercicios_template" TO "service_role";
 GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "anon";
 GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."exercicios_template_id_seq" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."food_items" TO "anon";
+GRANT ALL ON TABLE "public"."food_items" TO "authenticated";
+GRANT ALL ON TABLE "public"."food_items" TO "service_role";
 
 
 
@@ -5975,6 +6818,12 @@ GRANT ALL ON TABLE "public"."vw_aluno_completo" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "anon";
+GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."vw_completions_aguardando_processamento" TO "anon";
 GRANT ALL ON TABLE "public"."vw_completions_aguardando_processamento" TO "authenticated";
 GRANT ALL ON TABLE "public"."vw_completions_aguardando_processamento" TO "service_role";
@@ -5990,6 +6839,18 @@ GRANT ALL ON TABLE "public"."vw_mensagens_aguardando_agregacao" TO "service_role
 GRANT ALL ON TABLE "public"."vw_metricas_diarias_por_aluno" TO "anon";
 GRANT ALL ON TABLE "public"."vw_metricas_diarias_por_aluno" TO "authenticated";
 GRANT ALL ON TABLE "public"."vw_metricas_diarias_por_aluno" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."vw_metricas_hoje_por_aluno" TO "anon";
+GRANT ALL ON TABLE "public"."vw_metricas_hoje_por_aluno" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_metricas_hoje_por_aluno" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."vw_nutricao_hoje_por_aluno" TO "anon";
+GRANT ALL ON TABLE "public"."vw_nutricao_hoje_por_aluno" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_nutricao_hoje_por_aluno" TO "service_role";
 
 
 
@@ -6119,6 +6980,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict 2A36RsrTOn0sOFlI9TdMPaCMVTITYbwkb6aw8I4QVlQxxMCNYOuyz5YuDqfOGio
+\unrestrict TaZrCZMzBbcIcwyDmfFwLRdAAWRAxr9RJQe0GgeTaHeWtX3wGfOj6MbifsMbupC
 
 RESET ALL;

@@ -1,36 +1,4 @@
-/**
- * @name criar-dieta-completa
- * @version 1.0.0
- * @author NutriCoach AI Development Team
- * @date 2025-11-09
- * @lastModified 2025-11-09T09:00:00-03:00
- *
- * @description
- * Edge Function para criar plano alimentar completo.
- * Recebe 2 tool calls da OpenAI (macros_totais e dieta) e chama
- * Edge Function para processar e finalizar.
- *
- * @workflow
- * 1. Recebe: { aluno_id, mensagem_nutricionista }
- * 2. Busca/cria conversation_id em instrucoes_nutricionista
- * 3. Busca prompt 'criar_dieta' (prompt_base + functions_jsonb)
- * 4. Envia para OpenAI com as ferramentas
- * 5. Detecta 2 tool calls no output
- * 6. Chama Edge Function passando:
- *    - aluno_id, conversation_id
- *    - tool_call_id_1, tool_call_id_2
- *    - macros_totais, dieta
- * 7. Encerra
- *
- * @input
- * - aluno_id: UUID
- * - mensagem_nutricionista: string
- *
- * @output
- * - success: boolean
- * - tool_calls_detectados: number
- * - conversation_id: string
- */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -69,9 +37,7 @@ serve(async (req)=>{
         persistSession: false
       }
     });
-    // ============================================
     // ETAPA 2: BUSCAR/CRIAR CONVERSATION_ID
-    // ============================================
     console.log(`[2] 🔍 Buscando conversation_id...`);
     const { data: instrData, error: instrErr } = await supabase.from("instrucoes_nutricionista").select("id, conversation_id").eq("aluno_id", aluno_id).maybeSingle();
     if (instrErr) {
@@ -101,7 +67,6 @@ serve(async (req)=>{
       const convData = await createConvResponse.json();
       conversation_id = convData.id;
       console.log(`[2.1] ✅ Conversation criado: ${conversation_id}`);
-      // Atualizar ou criar registro
       if (!instrucoes_id) {
         const { data: insertData, error: insertErr } = await supabase.from("instrucoes_nutricionista").insert({
           aluno_id: aluno_id,
@@ -121,9 +86,7 @@ serve(async (req)=>{
         console.log(`[2.2] ✅ Conversation atualizado no registro`);
       }
     }
-    // ============================================
     // ETAPA 3: BUSCAR PROMPT E TOOLS
-    // ============================================
     console.log(`[3] 🔍 Buscando prompt: criar_dieta`);
     const { data: promptData, error: promptErr } = await supabase.from("prompts_sistema").select("prompt_base, functions_jsonb").eq("chave", "criar_dieta").maybeSingle();
     if (promptErr || !promptData) {
@@ -131,9 +94,7 @@ serve(async (req)=>{
     }
     console.log(`[3] ✅ Prompt: ${promptData.prompt_base.length} chars`);
     console.log(`[3] ✅ Tools: ${promptData.functions_jsonb.length} ferramenta(s)`);
-    // ============================================
     // ETAPA 4: ENVIAR PARA OPENAI
-    // ============================================
     console.log(`[4] 📤 Enviando para OpenAI...`);
     const payload = {
       model: OPENAI_MODEL,
@@ -158,9 +119,7 @@ serve(async (req)=>{
     console.log(`[4] ✅ Response ID: ${responseData.id}`);
     console.log(`[4] 📊 Input tokens: ${responseData.usage?.input_tokens ?? 'N/A'}`);
     console.log(`[4] 📊 Output tokens: ${responseData.usage?.output_tokens ?? 'N/A'}`);
-    // ============================================
     // ETAPA 5: DETECTAR 2 TOOL CALLS
-    // ============================================
     console.log(`[5] 🔍 Detectando tool calls...`);
     const toolCalls = [];
     for (const item of responseData.output || []){
@@ -173,9 +132,7 @@ serve(async (req)=>{
       throw new Error(`Esperava 2 tool calls, recebeu ${toolCalls.length}`);
     }
     console.log(`[5] ✅ 2 tool calls detectados com sucesso`);
-    // ============================================
     // ETAPA 6: EXTRAIR ARGUMENTOS
-    // ============================================
     console.log(`[6] 📥 Extraindo argumentos...`);
     const tool1 = toolCalls[0];
     const tool2 = toolCalls[1];
@@ -183,49 +140,45 @@ serve(async (req)=>{
     const args2 = JSON.parse(tool2.arguments || "{}");
     console.log(`[6] ✅ Tool 1 (${tool1.name}):`, Object.keys(args1));
     console.log(`[6] ✅ Tool 2 (${tool2.name}):`, Object.keys(args2));
-    // Identificar qual é macros e qual é dieta pelo nome da tool
-    let macros_totais, dieta, tool_call_id_macros, tool_call_id_dieta;
-    if (tool1.name.includes('macro') || tool1.name.includes('calculo')) {
-      macros_totais = args1;
-      tool_call_id_macros = tool1.call_id;
-      dieta = args2;
-      tool_call_id_dieta = tool2.call_id;
+    let meta_diaria_geral, plano_semanal;
+    if (tool1.name.includes('macro') || tool1.name.includes('calcul')) {
+      meta_diaria_geral = args1;
+      plano_semanal = args2;
     } else {
-      macros_totais = args2;
-      tool_call_id_macros = tool2.call_id;
-      dieta = args1;
-      tool_call_id_dieta = tool1.call_id;
+      meta_diaria_geral = args2;
+      plano_semanal = args1;
     }
-    console.log(`[6] ✅ Macros ID: ${tool_call_id_macros}`);
-    console.log(`[6] ✅ Dieta ID: ${tool_call_id_dieta}`);
-    // ============================================
-    // ETAPA 7: CHAMAR EDGE FUNCTION
-    // ============================================
-    console.log(`[7] 🚀 Chamando processar-dieta-completa...`);
-    const { error: edgeError } = await supabase.functions.invoke('processar-dieta-completa', {
-      body: {
-        aluno_id: aluno_id,
-        conversation_id: conversation_id,
-        tool_call_id_macros: tool_call_id_macros,
-        tool_call_id_dieta: tool_call_id_dieta,
-        macros_totais: macros_totais,
-        dieta: dieta
-      }
-    });
-    if (edgeError) {
-      console.error(`[7] ❌ Erro na Edge Function:`, edgeError);
-      throw new Error(`Erro ao processar dieta: ${edgeError.message}`);
+    console.log(`[6] ✅ Meta diária extraída`);
+    console.log(`[6] ✅ Plano semanal extraído`);
+    // ETAPA 7: SALVAR EM DIET_PLANS
+    console.log(`[7] 💾 Salvando em diet_plans...`);
+    await supabase.from('diet_plans').update({
+      is_active: false
+    }).eq('aluno_id', aluno_id).eq('is_active', true);
+    const { data: versionData } = await supabase.from('diet_plans').select('version').eq('aluno_id', aluno_id).order('version', {
+      ascending: false
+    }).limit(1).maybeSingle();
+    const proxima_versao = (versionData?.version || 0) + 1;
+    const { data: insertData, error: insertError } = await supabase.from('diet_plans').insert({
+      aluno_id: aluno_id,
+      version: proxima_versao,
+      is_active: true,
+      meta_diaria_geral: meta_diaria_geral,
+      plano_semanal: plano_semanal,
+      data_inicio: new Date().toISOString().split('T')[0],
+      notas: 'Plano criado via IA'
+    }).select().single();
+    if (insertError) {
+      throw new Error(`Erro ao inserir plano: ${insertError.message}`);
     }
-    console.log(`[7] ✅ Edge Function executada com sucesso`);
-    // ============================================
+    console.log(`[7] ✅ Plano inserido: ${insertData.id}`);
     // ETAPA 8: RETORNAR SUCESSO
-    // ============================================
     const finishedAt = new Date().toISOString();
     console.log(`[8] 🎉 Concluído: ${finishedAt}\n`);
     return jsonResponse({
       success: true,
       tool_calls_detectados: 2,
-      conversation_id: conversation_id,
+      plano_id: insertData.id,
       timing: {
         started_at: startedAt,
         finished_at: finishedAt

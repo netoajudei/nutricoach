@@ -20,28 +20,56 @@ supabase logout
 supabase projects list
 
 # Vincular projeto local ao remoto
-supabase link --project-ref SEU_PROJECT_ID
+supabase link --project-ref hiufaonhsxlnoozwbygq
 ```
 
 ### 3. Backup da Estrutura do Banco
 ```bash
 # Exportar estrutura do banco (sem dados)
-supabase db dump --linked -f nome_do_arquivo.sql
+supabase db dump --linked -f nutricoach_10-10v7.sql
+supabase db dump --linked -f nutricoach_10-10v7.sql
 
-# Exportar com project-ref específico
-supabase db dump --project-ref SEU_PROJECT_ID -f nome_do_arquivo.sql
-```
 
 ### 4. Gerenciar Edge Functions
 ```bash
 # Listar todas as Edge Functions
-supabase functions list --project-ref SEU_PROJECT_ID
+supabase functions list --project-ref hiufaonhsxlnoozwbygq
 
 # Baixar uma Edge Function específica
-supabase functions download NOME_DA_FUNCAO --project-ref SEU_PROJECT_ID
+supabase functions download webhook_wappi --project-ref hiufaonhsxlnoozwbygq
+supabase functions download enviar_menssagem_whatsapp --project-ref hiufaonhsxlnoozwbygq
+supabase functions download orquestrador-ia --project-ref hiufaonhsxlnoozwbygq
+supabase functions download webhook-wame --project-ref hiufaonhsxlnoozwbygq
+supabase functions download registrar-tokens --project-ref hiufaonhsxlnoozwbygq
+supabase functions download transcrever-audio --project-ref hiufaonhsxlnoozwbygq
+supabase functions download smart-action --project-ref hiufaonhsxlnoozwbygq
+supabase functions download testar-extracao --project-ref hiufaonhsxlnoozwbygq
+supabase functions download extrair-macros-de-texto --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-atualizacao-carga --project-ref hiufaonhsxlnoozwbygq
+supabase functions download atualizar-carga-exercicio --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-registro-refeicao --project-ref hiufaonhsxlnoozwbygq
+supabase functions download finalizar-function-calling --project-ref hiufaonhsxlnoozwbygq
+supabase functions download cancelar-registro --project-ref hiufaonhsxlnoozwbygq
+supabase functions download reenviar-botao-confirmacao --project-ref hiufaonhsxlnoozwbygq
+supabase functions download finalizar-e-limpar --project-ref hiufaonhsxlnoozwbygq
+supabase functions download finalizar-registro-refeicao --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-medidas-corporais --project-ref hiufaonhsxlnoozwbygq
+supabase functions download atualizar_medidas_corporais --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-conclusao-treino --project-ref hiufaonhsxlnoozwbygq
+supabase functions download registrar-conclusao-treino --project-ref hiufaonhsxlnoozwbygq
+supabase functions download iniciar-plano-de-treino --project-ref hiufaonhsxlnoozwbygq
+supabase functions download criar-exercicios-treino --project-ref hiufaonhsxlnoozwbygq
+supabase functions download chat-nutricionista --project-ref hiufaonhsxlnoozwbygq
+supabase functions download chat-personal --project-ref hiufaonhsxlnoozwbygq
+supabase functions download criar-dieta-completa --project-ref hiufaonhsxlnoozwbygq
+supabase functions download processar-dieta-completa --project-ref hiufaonhsxlnoozwbygq
 
-# Exemplo:
-supabase functions download waapi-webhook --project-ref ctsvfluufyfhkqlonqio
+
+
+
+
+
+
 ```
 
 ---
