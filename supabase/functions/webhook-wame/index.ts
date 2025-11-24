@@ -1,18 +1,18 @@
 /**
  * @name webhook-wame
- * @version 4.0.0
+ * @version 4.1.0
  * @author NutriCoach AI Development Team
- * @date 2025-11-05 02:00:00 -03:00
  * 
  * @description
  * Webhook para receber mensagens do WAME.
  * Sistema de botões dinâmico com tabela botoes_ativos.
+ * Suporte a vinculação UUID/@lid para onboarding.
  * 
  * @changelog
- * - v4.0.0: Sistema de botões dinâmico
- *   - Bloqueio via tabela botoes_ativos
- *   - Roteamento dinâmico de botões
- *   - Reenvio automático de botões pendentes
+ * - v4.1.0: Adicionado suporte a vinculação UUID/@lid
+ *   - Detecção correta de @lid via data.isLid
+ *   - Ramificação para UUID quando aluno não encontrado
+ *   - Mensagem de boas-vindas automática
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
@@ -26,7 +26,7 @@ serve(async (req)=>{
     });
   }
   try {
-    console.log('[WEBHOOK-WAME v4.0] 📥 Webhook recebido');
+    console.log('[WEBHOOK-WAME v4.1] 📥 Webhook recebido');
     const body = await req.json();
     // 🔥 LOG COMPLETO DO PAYLOAD RECEBIDO
     console.log('═══════════════════════════════════════');
@@ -58,17 +58,92 @@ serve(async (req)=>{
     // ========================================
     console.log('[WEBHOOK-WAME] 🔍 Buscando aluno...');
     let { data: aluno, error: alunoError } = await supabase.from('alunos').select('id, whatsapp').eq('whatsapp', whatsappNumber).single();
+    // ========================================
+    // RAMIFICAÇÃO: SE ALUNO NÃO ENCONTRADO
+    // ========================================
+    // ========================================
+    // ========================================
+    // SUBSTITUIR O BLOCO COMPLETO "if (alunoError || !aluno)"
+    // Das linhas ~60 até ~150
+    // ========================================
     if (alunoError || !aluno) {
-      console.log('[WEBHOOK-WAME] 👤 Aluno não encontrado, criando...');
-      const { data: novoAluno, error: createError } = await supabase.from('alunos').insert({
-        whatsapp: whatsappNumber,
-        status: 'ativo'
-      }).select('id, whatsapp').single();
-      if (createError) {
-        throw new Error(`Erro ao criar aluno: ${createError.message}`);
+      console.log('[WEBHOOK-WAME] 👤 Aluno não encontrado');
+      // ========================================
+      // DETECÇÃO DE @LID (FORMA CORRETA)
+      // ========================================
+      const isLid = data.onlyLid === true || data.isLid === true || whatsappNumber.includes('@lid');
+      if (isLid) {
+        console.log('[WEBHOOK-WAME] 🔐 Mensagem @lid detectada');
+        // Extrair conteúdo da mensagem
+        let mensagemTexto = data.msgContent?.conversation || data.msgContent?.text || data.msgContent?.extendedTextMessage?.text || data.text || data.conversation || '';
+        mensagemTexto = mensagemTexto.trim();
+        console.log('[WEBHOOK-WAME] 📝 Conteúdo:', mensagemTexto);
+        // ========================================
+        // VERIFICAR SE É UUID (36 caracteres)
+        // ========================================
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const isUUID = mensagemTexto.length === 36 && uuidRegex.test(mensagemTexto);
+        if (isUUID) {
+          console.log('[WEBHOOK-WAME] 🆔 UUID detectado:', mensagemTexto);
+          // Buscar aluno pelo UUID
+          const { data: alunoByUuid, error: uuidError } = await supabase.from('alunos').select('id, nome_completo').eq('id', mensagemTexto).single();
+          if (alunoByUuid) {
+            console.log('[WEBHOOK-WAME] ✅ Aluno encontrado:', alunoByUuid.nome_completo);
+            // remoteJid já vem completo com @lid
+            const whatsappParaSalvar = data.remoteJid;
+            // Atualizar WhatsApp do aluno
+            const { error: updateError } = await supabase.from('alunos').update({
+              whatsapp: whatsappParaSalvar,
+              last_interaction_at: new Date().toISOString()
+            }).eq('id', mensagemTexto);
+            if (updateError) {
+              console.error('[WEBHOOK-WAME] ❌ Erro ao atualizar:', updateError);
+              throw updateError;
+            }
+            console.log('[WEBHOOK-WAME] ✅ WhatsApp vinculado:', whatsappParaSalvar);
+            // Enviar mensagem de boas-vindas
+            const { data: configData } = await supabase.from('config_sistema').select('valor').eq('chave', 'wame_api_key').single();
+            if (configData) {
+              const mensagemBoasVindas = `✅ *Cadastro concluído com sucesso!*
+
+Olá ${alunoByUuid.nome_completo}, seja bem-vindo(a) ao ZapNutri! 💪
+
+Agora você já pode conversar comigo. Como posso te ajudar hoje?`;
+              await fetch(`https://us.api-wa.me/${configData.valor}/message/text`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  to: data.remoteJid,
+                  text: mensagemBoasVindas
+                })
+              }).catch((err)=>console.error('[WEBHOOK-WAME] Erro ao enviar boas-vindas:', err));
+              console.log('[WEBHOOK-WAME] 📤 Mensagem de boas-vindas enviada');
+            }
+            // Parar processamento aqui - UUID foi processado
+            return new Response('ok: uuid vinculado', {
+              headers: corsHeaders
+            });
+          } else {
+            console.log('[WEBHOOK-WAME] ⚠️ UUID não encontrado no banco');
+          }
+        }
+        // ========================================
+        // @LID SEM UUID VÁLIDO - IGNORAR
+        // ========================================
+        console.log('[WEBHOOK-WAME] ⚠️ @lid sem UUID válido - ignorando');
+        return new Response('ok: lid sem uuid', {
+          headers: corsHeaders
+        });
       }
-      aluno = novoAluno;
-      console.log('[WEBHOOK-WAME] ✅ Aluno criado:', aluno.id);
+      // ========================================
+      // ALUNO NÃO CADASTRADO - IGNORAR
+      // ========================================
+      console.log('[WEBHOOK-WAME] ⚠️ Aluno não cadastrado - ignorando mensagem');
+      return new Response('ok: aluno nao cadastrado', {
+        headers: corsHeaders
+      });
     } else {
       console.log('[WEBHOOK-WAME] ✅ Aluno encontrado:', aluno.id);
     }

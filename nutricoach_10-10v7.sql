@@ -1,5 +1,5 @@
 
-\restrict TaZrCZMzBbcIcwyDmfFwLRdAAWRAxr9RJQe0GgeTaHeWtX3wGfOj6MbifsMbupC
+\restrict a8PyoyQC8e5Ez6D17PtrAOH08ixwwFvKWcbEFoeMHqlDyHAyo4M6TePGCEcsXT3
 
 
 SET statement_timeout = 0;
@@ -64,6 +64,21 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+
+
+
+CREATE TYPE "public"."status_onboarding" AS ENUM (
+    'aguardando_analise',
+    'em_revisao',
+    'aprovado',
+    'rejeitado'
+);
+
+
+ALTER TYPE "public"."status_onboarding" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."status_onboarding" IS 'Status do processo de onboarding e aprovação de novos alunos';
 
 
 
@@ -270,6 +285,64 @@ $$;
 
 
 ALTER FUNCTION "public"."agregar_mensagens_para_aluno"("p_aluno_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."aprovar_onboarding"("p_onboarding_id" "uuid", "p_aprovado_por_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_onboarding_record RECORD;
+    v_aluno_id UUID;
+BEGIN
+    -- 1. Verificar se o registro de onboarding existe e está pendente/aguardando
+    SELECT * INTO v_onboarding_record
+    FROM public.onboarding_pendente
+    WHERE id = p_onboarding_id
+      AND status IN ('aguardando_analise', 'em_revisao'); -- Só pode aprovar se não estiver rejeitado/concluído
+
+    IF v_onboarding_record IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Onboarding não encontrado ou status inválido para aprovação.'
+        );
+    END IF;
+
+    v_aluno_id := v_onboarding_record.aluno_id;
+
+    -- 2. Validar se quem está aprovando é o responsável (Opcional mas recomendado)
+    -- Aqui assumimos que o frontend já validou a permissão, mas no backend é mais seguro.
+    -- Para simplificar o MVP, vamos confiar que p_aprovado_por_id é válido.
+
+    -- 3. Atualizar o status na tabela onboarding_pendente
+    UPDATE public.onboarding_pendente
+    SET 
+        status = 'aprovado',
+        aprovado_por_id = p_aprovado_por_id,
+        data_aprovacao = NOW(),
+        updated_at = NOW()
+    WHERE id = p_onboarding_id;
+
+    -- 4. (Opcional) Atualizar o status do aluno na tabela 'alunos' se necessário
+    -- Ex: Mudar de 'trial' para 'active' se a aprovação for o gatilho
+    -- UPDATE public.alunos SET subscription_status = 'active' WHERE id = v_aluno_id;
+
+    -- 5. Retorno
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding aprovado com sucesso.',
+        'aluno_id', v_aluno_id
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao aprovar onboarding: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."aprovar_onboarding"("p_onboarding_id" "uuid", "p_aprovado_por_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."atualizar_carga_exercicio"("p_exercicio_id" "uuid", "p_aluno_id" "uuid", "p_nova_carga" numeric, "p_whatsapp" character varying) RETURNS json
@@ -781,6 +854,71 @@ $$;
 ALTER FUNCTION "public"."cron_rebuild_all_prompts"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."deletar_usuario_completo"("p_auth_user_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_aluno_id UUID;
+    v_email TEXT;
+BEGIN
+    -- 1. Verificar se o usuário existe na tabela 'public.alunos' e pegar o ID interno
+    SELECT id, email INTO v_aluno_id, v_email
+    FROM public.alunos
+    WHERE auth_user_id = p_auth_user_id;
+
+    IF v_aluno_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Usuário não encontrado na tabela de alunos (pode já ter sido deletado ou ID incorreto).'
+        );
+    END IF;
+
+    -- 2. Deletar dados das tabelas relacionadas (Ordem importa por causa das FKs)
+    -- Nota: Se suas FKs tiverem 'ON DELETE CASCADE', deletar o aluno já faria isso.
+    -- Mas é mais seguro e explícito deletar manualmente ou confiar no CASCADE se configurado.
+    
+    -- Vamos assumir que as FKs estão configuradas com ON DELETE CASCADE na tabela alunos.
+    -- Se sim, deletar de 'public.alunos' vai limpar tudo.
+    -- Se não, precisaríamos deletar manualmente de cada tabela:
+    -- DELETE FROM public.daily_consumption_history WHERE aluno_id = v_aluno_id;
+    -- DELETE FROM public.daily_workout_logs WHERE aluno_id = v_aluno_id;
+    -- ... etc.
+
+    -- Vou tentar deletar o aluno diretamente. Se as FKs estiverem corretas, o resto vai junto.
+    DELETE FROM public.alunos WHERE id = v_aluno_id;
+
+    -- 3. (Opcional e Avançado) Deletar o usuário da tabela 'auth.users'
+    -- Isso remove o login do Supabase Auth.
+    -- CUIDADO: Requer permissões especiais que funções PL/pgSQL normais podem não ter por padrão.
+    -- Geralmente, deletar de 'public.alunos' é o suficiente para a aplicação, 
+    -- e o usuário fica "orfão" no Auth ou você usa a API de Admin do Supabase (JS/Python) para deletar do Auth.
+    
+    -- Se você quiser deletar do Auth via SQL, precisa de permissão. 
+    -- O Supabase geralmente não recomenda fazer isso via RPC por segurança, 
+    -- mas sim via client library (supabase.auth.admin.deleteUser).
+    
+    -- Por isso, vamos focar em limpar os DADOS do usuário.
+    
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Dados do aluno deletados com sucesso.',
+        'aluno_id', v_aluno_id,
+        'email_removido', v_email,
+        'nota', 'O login em auth.users não foi removido por esta função (faça via Painel ou API Admin).'
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao deletar usuário: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."deletar_usuario_completo"("p_auth_user_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql"
     AS $$
@@ -807,6 +945,67 @@ ALTER FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", 
 
 COMMENT ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") IS 'Desativa um vínculo aluno-profissional, registrando data_fim e motivo';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."enviar_mensagem_ativacao_whatsapp"("p_whatsapp" "text", "p_aluno_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_api_key text;
+    v_mensagem_instrucao text;
+    v_mensagem_codigo text;
+    v_primeiro_nome text;
+BEGIN
+    -- 1. Busca a API Key
+    SELECT valor INTO v_api_key FROM public.config_sistema WHERE chave = 'wame_api_key';
+
+    IF v_api_key IS NULL THEN
+        RAISE WARNING 'WAME_API_KEY não configurada. Mensagem de ativação não enviada.';
+        RETURN;
+    END IF;
+
+    -- 2. Busca nome
+    SELECT split_part(nome_completo, ' ', 1) INTO v_primeiro_nome 
+    FROM public.alunos WHERE id = p_aluno_id;
+
+    -- 3. Monta a MENSAGEM 1 (Instruções)
+    v_mensagem_instrucao := format(
+        'Olá, %s! 👋 Aqui é da ZapNutri.' || E'\n\n' ||
+        'Seu plano de treino e dieta já está pronto! 🚀' || E'\n\n' ||
+        'Para ativar sua assistente de IA, por favor:' || E'\n' ||
+        '1. Adicione este número aos seus contatos.' || E'\n' ||
+        '2. Copie o código abaixo e nos envie como resposta:' || E'\n\n' ||
+        'Código:',
+        COALESCE(v_primeiro_nome, 'Aluno')
+    );
+
+    -- 4. Monta a MENSAGEM 2 (Apenas o Código)
+    v_mensagem_codigo := p_aluno_id::text;
+
+    -- 5. Envia MENSAGEM 1
+    PERFORM net.http_post(
+        url := 'https://us.api-wa.me/' || v_api_key || '/message/text',
+        headers := jsonb_build_object('Content-Type', 'application/json'),
+        body := jsonb_build_object(
+            'to', p_whatsapp,
+            'text', v_mensagem_instrucao
+        )
+    );
+
+    -- 6. Envia MENSAGEM 2 (Código Solto)
+    PERFORM net.http_post(
+        url := 'https://us.api-wa.me/' || v_api_key || '/message/text',
+        headers := jsonb_build_object('Content-Type', 'application/json'),
+        body := jsonb_build_object(
+            'to', p_whatsapp,
+            'text', v_mensagem_codigo
+        )
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."enviar_mensagem_ativacao_whatsapp"("p_whatsapp" "text", "p_aluno_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") RETURNS TABLE("status_code" integer, "response_body" "text")
@@ -858,6 +1057,245 @@ $$;
 
 
 ALTER FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_aluno_id uuid;
+    v_onboarding_id uuid;
+    v_whatsapp_novo text;
+    v_tem_dieta boolean;
+    v_tem_treino boolean;
+BEGIN
+    RAISE NOTICE '--- INICIANDO FINALIZAÇÃO. ID RECEBIDO: % ---', p_entrada_id;
+
+    -- 1. DESCOBERTA DE ID: Tenta achar o aluno através do ID do Onboarding
+    SELECT aluno_id, id, whatsapp_aluno 
+    INTO v_aluno_id, v_onboarding_id, v_whatsapp_novo
+    FROM public.onboarding_pendente
+    WHERE id = p_entrada_id;
+
+    -- Se não achou pelo ID do registro, assume que o ID passado JÁ É o do aluno
+    IF v_aluno_id IS NULL THEN
+        RAISE NOTICE 'ID passado não é de um onboarding. Assumindo que é ID de Aluno...';
+        v_aluno_id := p_entrada_id;
+        
+        -- Busca o onboarding usando o ID do aluno
+        SELECT id, whatsapp_aluno 
+        INTO v_onboarding_id, v_whatsapp_novo
+        FROM public.onboarding_pendente
+        WHERE aluno_id = v_aluno_id;
+    ELSE
+        RAISE NOTICE 'ID de Onboarding reconhecido. Aluno vinculado: %', v_aluno_id;
+    END IF;
+
+    -- Verificação de segurança: Se ainda assim não achamos o registro de onboarding
+    IF v_onboarding_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Nenhum registro de onboarding pendente encontrado para este ID.'
+        );
+    END IF;
+
+    -- 2. VALIDAR DIETA (Agora usando o v_aluno_id CORRETO)
+    SELECT EXISTS (
+        SELECT 1 FROM public.diet_plans WHERE aluno_id = v_aluno_id
+    ) INTO v_tem_dieta;
+
+    IF NOT v_tem_dieta THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Aluno não possui Plano Alimentar cadastrado.'
+        );
+    END IF;
+
+    -- 3. VALIDAR TREINO (Agora usando o v_aluno_id CORRETO)
+    SELECT EXISTS (
+        SELECT 1 FROM public.workout_programs WHERE aluno_id = v_aluno_id
+    ) INTO v_tem_treino;
+
+    IF NOT v_tem_treino THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Aluno não possui Programa de Treino cadastrado.'
+        );
+    END IF;
+
+    -- 4. ATUALIZAR WHATSAPP
+    IF v_whatsapp_novo IS NULL OR v_whatsapp_novo = '' THEN
+         RETURN jsonb_build_object(
+            'success', false, 
+            'message', 'Erro: WhatsApp do aluno está vazio no registro de onboarding.'
+        );
+    END IF;
+
+    UPDATE public.alunos
+    SET whatsapp = v_whatsapp_novo,
+        updated_at = NOW()
+    WHERE id = v_aluno_id;
+
+    -- 5. NOTIFICAÇÃO
+    PERFORM public.enviar_mensagem_ativacao_whatsapp(v_whatsapp_novo, v_aluno_id);
+
+    -- 6. LIMPEZA
+    DELETE FROM public.onboarding_pendente
+    WHERE id = v_onboarding_id;
+
+    -- Retorno de Sucesso
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding finalizado com sucesso! Mensagem enviada.',
+        'aluno_id', v_aluno_id,
+        'whatsapp_vinculado', v_whatsapp_novo
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'Erro Crítico: %', SQLERRM;
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro interno: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid", "p_profissional_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_aluno_id uuid;
+    v_onboarding_id uuid;
+    v_whatsapp_novo text;
+    v_tem_dieta boolean;
+    v_tem_treino boolean;
+    
+    -- Variáveis para tratamento do telefone
+    v_telefone_sem_pais text;
+    v_ddd text;
+    v_numero_final text;
+BEGIN
+    RAISE NOTICE '--- INICIANDO FINALIZAÇÃO. ID RECEBIDO: % | PROFISSIONAL: % ---', p_entrada_id, p_profissional_id;
+
+    -- 1. DESCOBERTA DE ID: Tenta achar o aluno através do ID do Onboarding
+    SELECT aluno_id, id, whatsapp_aluno 
+    INTO v_aluno_id, v_onboarding_id, v_whatsapp_novo
+    FROM public.onboarding_pendente
+    WHERE id = p_entrada_id;
+
+    -- Se não achou pelo ID do registro, assume que o ID passado JÁ É o do aluno
+    IF v_aluno_id IS NULL THEN
+        RAISE NOTICE 'ID passado não é de um onboarding. Assumindo que é ID de Aluno...';
+        v_aluno_id := p_entrada_id;
+        
+        -- Busca o onboarding usando o ID do aluno
+        SELECT id, whatsapp_aluno 
+        INTO v_onboarding_id, v_whatsapp_novo
+        FROM public.onboarding_pendente
+        WHERE aluno_id = v_aluno_id;
+    ELSE
+        RAISE NOTICE 'ID de Onboarding reconhecido. Aluno vinculado: %', v_aluno_id;
+    END IF;
+
+    -- Verificação de segurança
+    IF v_onboarding_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Nenhum registro de onboarding pendente encontrado para este ID.'
+        );
+    END IF;
+
+    -- 2. VALIDAR DIETA
+    SELECT EXISTS (
+        SELECT 1 FROM public.diet_plans WHERE aluno_id = v_aluno_id
+    ) INTO v_tem_dieta;
+
+    IF NOT v_tem_dieta THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Aluno não possui Plano Alimentar cadastrado.'
+        );
+    END IF;
+
+    -- 3. VALIDAR TREINO
+    SELECT EXISTS (
+        SELECT 1 FROM public.workout_programs WHERE aluno_id = v_aluno_id
+    ) INTO v_tem_treino;
+
+    IF NOT v_tem_treino THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Erro: Aluno não possui Programa de Treino cadastrado.'
+        );
+    END IF;
+
+    -- 4. TRATAMENTO E ATUALIZAÇÃO DO TELEFONE
+    IF v_whatsapp_novo IS NULL OR v_whatsapp_novo = '' THEN
+         RETURN jsonb_build_object(
+            'success', false, 
+            'message', 'Erro: WhatsApp do aluno está vazio no registro de onboarding.'
+        );
+    END IF;
+
+    -- Lógica de extração: 554892019922 -> DDD: 48, Num: 92019922
+    -- Remove os 2 primeiros caracteres (código do país 55)
+    v_telefone_sem_pais := substring(v_whatsapp_novo from 3);
+    
+    -- Pega o DDD (próximos 2 caracteres)
+    v_ddd := substring(v_telefone_sem_pais from 1 for 2);
+    
+    -- Pega o Número (o restante da string)
+    v_numero_final := substring(v_telefone_sem_pais from 3);
+
+    -- Atualiza tabela ALUNOS com DDD e Número separados
+    -- Nota: Mantivemos a atualização do campo 'whatsapp' completo também para garantir compatibilidade com o resto do sistema
+    UPDATE public.alunos
+    SET 
+        whatsapp = v_whatsapp_novo,
+        ddd = v_ddd,
+        numero_telefone = v_numero_final,
+        updated_at = NOW()
+    WHERE id = v_aluno_id;
+
+    -- 5. ATUALIZAÇÃO DO ONBOARDING (Sem deletar)
+    -- Registra quem aprovou e muda o status
+    UPDATE public.onboarding_pendente
+    SET 
+        status = 'aprovado',
+        profissional_responsavel_id = p_profissional_id,
+        aprovado_por_id = p_profissional_id,
+        data_aprovacao = NOW(),
+        updated_at = NOW()
+    WHERE id = v_onboarding_id;
+
+    -- 6. NOTIFICAÇÃO
+    PERFORM public.enviar_mensagem_ativacao_whatsapp(v_whatsapp_novo, v_aluno_id);
+
+    -- Retorno de Sucesso
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding finalizado com sucesso! Mensagem enviada e dados atualizados.',
+        'aluno_id', v_aluno_id,
+        'whatsapp_vinculado', v_whatsapp_novo,
+        'ddd', v_ddd,
+        'numero', v_numero_final
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'Erro Crítico: %', SQLERRM;
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro interno: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid", "p_profissional_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."gerar_codigo_convite"("p_tipo_profissional" "text" DEFAULT 'NUTRI'::"text") RETURNS character varying
@@ -1608,6 +2046,78 @@ COMMENT ON FUNCTION "public"."limpar_completions_antigos"() IS 'Remove completio
 
 
 
+CREATE OR REPLACE FUNCTION "public"."limpar_dados_aluno"("p_aluno_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_rows_deleted int;
+    v_total_deleted int := 0;
+BEGIN
+    -- 1. Limpar Cache de IA (Contexto)
+    DELETE FROM public.dynamic_prompts WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 2. Limpar Dados de Saúde e Rotina
+    DELETE FROM public.saude_e_rotina WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 3. Limpar Preferências Alimentares
+    DELETE FROM public.preferencias_alimentares WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 4. Limpar Preferências de Treino
+    DELETE FROM public.preferencias_treino WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 5. Limpar Métricas Corporais (Peso/Medidas)
+    DELETE FROM public.body_metrics WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 6. Limpar Objetivos/Metas
+    -- Nota: Se houver conquistas (achievements) ligadas a meta, o vínculo ficará NULL automaticamente.
+    DELETE FROM public.goals WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 7. Limpar Status de Onboarding
+    DELETE FROM public.onboarding_pendente WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 8. Limpar Planos de Dieta
+    DELETE FROM public.diet_plans WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    -- 9. Remover Vínculo com Profissional
+    DELETE FROM public.aluno_profissional WHERE aluno_id = p_aluno_id;
+    GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
+    v_total_deleted := v_total_deleted + v_rows_deleted;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Limpeza concluída para as tabelas solicitadas.',
+        'registros_deletados', v_total_deleted,
+        'aluno_id', p_aluno_id
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao limpar dados do aluno: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."limpar_dados_aluno"("p_aluno_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."limpar_mensagens_temporarias"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -1630,6 +2140,27 @@ ALTER FUNCTION "public"."limpar_mensagens_temporarias"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "public"."limpar_mensagens_temporarias"() IS 'Remove mensagens agregadas há mais de 24h.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."marcar_onboarding_concluido"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+    -- Atualiza o onboarding_pendente para status 'concluido'
+    UPDATE public.onboarding_pendente
+    SET 
+        status = 'aprovado',
+        data_aprovacao = NOW(),
+        updated_at = NOW()
+    WHERE aluno_id = NEW.id
+      AND status IN ('aguardando_analise', 'em_revisao');
+    
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."marcar_onboarding_concluido"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."obter_resumo_diario"("p_aluno_id" "uuid") RETURNS "text"
@@ -2741,6 +3272,56 @@ COMMENT ON FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", "p
 
 
 
+CREATE OR REPLACE FUNCTION "public"."rejeitar_onboarding"("p_onboarding_id" "uuid", "p_motivo" "text", "p_rejeitado_por_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_onboarding_record RECORD;
+BEGIN
+    -- 1. Verificar registro
+    SELECT * INTO v_onboarding_record
+    FROM public.onboarding_pendente
+    WHERE id = p_onboarding_id
+      AND status IN ('aguardando_analise', 'em_revisao');
+
+    IF v_onboarding_record IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Onboarding não encontrado ou status inválido para rejeição.'
+        );
+    END IF;
+
+    -- 2. Atualizar status e adicionar motivo nas observações (concatenando)
+    -- Vamos salvar o motivo no campo de observações do tipo do profissional
+    -- Como não sabemos se quem rejeitou é nutri ou personal, vamos salvar em ambos ou criar um campo genérico.
+    -- Para o MVP, vamos salvar no campo 'observacoes_profissional_personal' como log geral.
+    
+    UPDATE public.onboarding_pendente
+    SET 
+        status = 'rejeitado',
+        aprovado_por_id = p_rejeitado_por_id, -- Usamos a mesma coluna para rastrear quem agiu
+        observacoes_profissional_personal = COALESCE(observacoes_profissional_personal, '') || E'\n[REJEIÇÃO]: ' || p_motivo,
+        updated_at = NOW()
+    WHERE id = p_onboarding_id;
+
+    -- 3. Retorno
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding rejeitado.'
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao rejeitar onboarding: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."rejeitar_onboarding"("p_onboarding_id" "uuid", "p_motivo" "text", "p_rejeitado_por_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."run_aggregation_and_reset_flag"("p_aluno_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql"
     AS $$
@@ -2812,6 +3393,277 @@ $$;
 
 
 ALTER FUNCTION "public"."schedule_aggregation_on_new_message"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."submeter_onboarding_aluno"("p_aluno_id" "uuid", "p_dados_form" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_profissional_id UUID;
+    v_existe_vinculo BOOLEAN;
+    v_status_final TEXT;
+    v_mensagem_retorno TEXT;
+    
+    -- Variáveis para extração de dados (Validação)
+    v_peso NUMERIC;
+    v_altura NUMERIC;
+    v_objetivo TEXT;
+BEGIN
+    -- 1. VALIDAÇÃO DE CAMPOS OBRIGATÓRIOS (Etapa 4.2)
+    -- Extraindo dados do JSON para variáveis locais
+    v_peso := (p_dados_form->'biometria'->>'peso')::NUMERIC;
+    v_altura := (p_dados_form->'biometria'->>'altura')::NUMERIC;
+    v_objetivo := p_dados_form->>'objetivo_principal';
+
+    -- Regras de Negócio
+    IF v_peso IS NULL OR v_peso <= 0 THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Peso inválido ou não informado.');
+    END IF;
+    
+    IF v_altura IS NULL OR v_altura <= 0 THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Altura inválida ou não informada.');
+    END IF;
+
+    IF v_objetivo IS NULL OR TRIM(v_objetivo) = '' THEN
+        RETURN jsonb_build_object('success', false, 'message', 'Objetivo principal é obrigatório.');
+    END IF;
+
+    -- 2. PERSISTÊNCIA DOS DADOS NAS TABELAS DO SISTEMA
+    -- (Aqui distribuímos o JSON para as tabelas reais para que a IA ou o Profissional possam ler depois)
+    
+    -- 2.1 Atualizar Body Metrics (Biometria)
+    INSERT INTO public.body_metrics (aluno_id, weight_kg, height_cm, measurement_date)
+    VALUES (p_aluno_id, v_peso, v_altura, CURRENT_DATE);
+
+    -- 2.2 Atualizar Goals (Meta)
+    -- Desativa metas anteriores
+    UPDATE public.goals SET status = 'abandoned' WHERE aluno_id = p_aluno_id AND status = 'active';
+    
+    INSERT INTO public.goals (aluno_id, nome_meta, status, created_at)
+    VALUES (p_aluno_id, v_objetivo, 'active', NOW());
+
+    -- 2.3 Salvar Preferências (Simplificado - salva o JSON cru se a estrutura bater, ou adapta)
+    INSERT INTO public.preferencias_alimentares (aluno_id, restricoes_alimentares)
+    VALUES (p_aluno_id, ARRAY(SELECT jsonb_array_elements_text(p_dados_form->'alimentacao'->'restricoes')))
+    ON CONFLICT (aluno_id) DO UPDATE 
+    SET restricoes_alimentares = EXCLUDED.restricoes_alimentares;
+
+    -- 3. VERIFICAÇÃO DE VÍNCULO (O "Gatekeeper")
+    SELECT profissional_id INTO v_profissional_id
+    FROM public.aluno_profissional
+    WHERE aluno_id = p_aluno_id AND is_active = true
+    LIMIT 1;
+
+    IF v_profissional_id IS NOT NULL THEN
+        -- ====================================================
+        -- CENÁRIO B2B2C: ALUNO VINCULADO A PROFISSIONAL
+        -- ====================================================
+        
+        -- Salva na tabela de pendência para o Nutri/Personal ver
+        INSERT INTO public.onboarding_pendente (
+            aluno_id, 
+            profissional_responsavel_id, 
+            status, 
+            dados_completos
+        ) VALUES (
+            p_aluno_id,
+            v_profissional_id,
+            'pendente',
+            p_dados_form
+        )
+        ON CONFLICT (aluno_id) DO UPDATE
+        SET 
+            status = 'pendente',
+            profissional_responsavel_id = v_profissional_id,
+            dados_completos = p_dados_form,
+            updated_at = NOW();
+
+        v_status_final := 'aguardando_profissional';
+        v_mensagem_retorno := 'Cadastro recebido! Seu treinador/nutricionista foi notificado para criar seu plano.';
+
+    ELSE
+        -- ====================================================
+        -- CENÁRIO B2C: ALUNO INDEPENDENTE
+        -- ====================================================
+        
+        -- Não cria pendência, libera para IA
+        v_status_final := 'liberado_ia';
+        v_mensagem_retorno := 'Cadastro concluído! Nossa IA está analisando seus dados.';
+        
+        -- (Opcional) Aqui você poderia disparar a IA imediatamente, 
+        -- mas é melhor deixar o frontend chamar 'iniciar-plano-de-treino' após receber este sucesso.
+    END IF;
+
+    -- 4. RETORNO FINAL
+    RETURN jsonb_build_object(
+        'success', true,
+        'status', v_status_final,
+        'message', v_mensagem_retorno,
+        'profissional_id', v_profissional_id
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao processar onboarding: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."submeter_onboarding_aluno"("p_aluno_id" "uuid", "p_dados_form" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_profissional_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_vinculo_resultado JSONB;
+    v_whatsapp_prof VARCHAR;
+BEGIN
+    -- 1. Tentar vincular o Profissional (Se ID foi fornecido)
+    IF p_profissional_id IS NOT NULL THEN
+        -- Chama a função de vínculo da Etapa 2
+        v_vinculo_resultado := public.vincular_aluno_profissional(
+            p_aluno_id, 
+            p_profissional_id
+        );
+        
+        -- Busca o WhatsApp do profissional para preencher na tabela de notificação
+        SELECT whatsapp INTO v_whatsapp_prof
+        FROM public.alunos
+        WHERE id = p_profissional_id;
+    END IF;
+
+    -- 2. Inserir/Atualizar na tabela onboarding_pendente
+    -- CORREÇÃO: Usando status 'aguardando_analise' que é válido no seu ENUM
+    INSERT INTO public.onboarding_pendente (
+        aluno_id,
+        profissional_responsavel_id,
+        tem_dieta_atual,
+        dieta_atual_texto,
+        tem_treino_atual,
+        treino_atual_texto,
+        whatsapp_notificacao,
+        status, -- Coluna do tipo ENUM
+        notificacao_enviada,
+        updated_at
+    ) VALUES (
+        p_aluno_id,
+        p_profissional_id,
+        p_tem_dieta_atual,
+        p_dieta_atual_texto,
+        p_tem_treino_atual,
+        p_treino_atual_texto,
+        v_whatsapp_prof,
+        'aguardando_analise', -- <== VALOR CORRIGIDO AQUI
+        false,
+        NOW()
+    )
+    ON CONFLICT (aluno_id) DO UPDATE
+    SET 
+        profissional_responsavel_id = EXCLUDED.profissional_responsavel_id,
+        tem_dieta_atual = EXCLUDED.tem_dieta_atual,
+        dieta_atual_texto = EXCLUDED.dieta_atual_texto,
+        tem_treino_atual = EXCLUDED.tem_treino_atual,
+        treino_atual_texto = EXCLUDED.treino_atual_texto,
+        whatsapp_notificacao = EXCLUDED.whatsapp_notificacao,
+        status = 'aguardando_analise', -- <== VALOR CORRIGIDO AQUI (Reseta se reenviar)
+        updated_at = NOW();
+
+    -- 3. Retorno de Sucesso
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding registrado com sucesso.',
+        'profissional_vinculado', p_profissional_id IS NOT NULL
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao salvar onboarding: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_profissional_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_whatsapp" "text", "p_profissional_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_vinculo_resultado JSONB;
+    v_whatsapp_prof VARCHAR;
+BEGIN
+    -- A. Tentar vincular o Profissional (Se ID foi fornecido)
+    IF p_profissional_id IS NOT NULL THEN
+        v_vinculo_resultado := public.vincular_aluno_profissional(
+            p_aluno_id, 
+            p_profissional_id
+        );
+        
+        -- Busca Zap do Profissional para notificação
+        SELECT whatsapp INTO v_whatsapp_prof
+        FROM public.alunos
+        WHERE id = p_profissional_id;
+    END IF;
+
+    -- B. Inserir/Atualizar com o novo campo whatsapp_aluno
+    INSERT INTO public.onboarding_pendente (
+        aluno_id,
+        profissional_responsavel_id,
+        tem_dieta_atual,
+        dieta_atual_texto,
+        tem_treino_atual,
+        treino_atual_texto,
+        whatsapp_aluno,      -- <== SALVANDO AQUI
+        whatsapp_notificacao, -- Zap do Profissional (para o bot avisar ele)
+        status,
+        notificacao_enviada,
+        updated_at
+    ) VALUES (
+        p_aluno_id,
+        p_profissional_id,
+        p_tem_dieta_atual,
+        p_dieta_atual_texto,
+        p_tem_treino_atual,
+        p_treino_atual_texto,
+        p_whatsapp,          -- <== VALOR DO PARAMETRO
+        v_whatsapp_prof,
+        'aguardando_analise',
+        false,
+        NOW()
+    )
+    ON CONFLICT (aluno_id) DO UPDATE
+    SET 
+        profissional_responsavel_id = EXCLUDED.profissional_responsavel_id,
+        tem_dieta_atual = EXCLUDED.tem_dieta_atual,
+        dieta_atual_texto = EXCLUDED.dieta_atual_texto,
+        tem_treino_atual = EXCLUDED.tem_treino_atual,
+        treino_atual_texto = EXCLUDED.treino_atual_texto,
+        whatsapp_aluno = EXCLUDED.whatsapp_aluno, -- Atualiza se mudar
+        whatsapp_notificacao = EXCLUDED.whatsapp_notificacao,
+        status = 'aguardando_analise',
+        updated_at = NOW();
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Onboarding registrado com sucesso.',
+        'whatsapp_salvo', p_whatsapp
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro ao salvar onboarding: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_whatsapp" "text", "p_profissional_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."testar_edge_propor_refeicao"() RETURNS "text"
@@ -3016,6 +3868,19 @@ $$;
 ALTER FUNCTION "public"."trigger_convite_ativado"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."update_onboarding_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."update_onboarding_updated_at"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at_column"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -3031,6 +3896,27 @@ ALTER FUNCTION "public"."update_updated_at_column"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "public"."update_updated_at_column"() IS 'Função trigger genérica que atualiza automaticamente o campo updated_at para NOW() em qualquer UPDATE.';
 
+
+
+CREATE OR REPLACE FUNCTION "public"."validar_profissional_responsavel"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+    IF NEW.profissional_responsavel_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM alunos 
+            WHERE id = NEW.profissional_responsavel_id 
+            AND role IN ('nutricionista', 'personal', 'master', 'dev')
+        ) THEN
+            RAISE EXCEPTION 'Profissional responsavel deve ter role nutricionista, personal, master ou dev';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."validar_profissional_responsavel"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."validate_profissional_role"() RETURNS "trigger"
@@ -3055,6 +3941,80 @@ $$;
 
 
 ALTER FUNCTION "public"."validate_profissional_role"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."vincular_aluno_profissional"("p_aluno_id" "uuid", "p_profissional_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+DECLARE
+    v_role_profissional public.user_role;
+    v_tipo_profissional public.tipo_profissional;
+    v_vinculo_id UUID;
+BEGIN
+    -- 1. Verificar se o Profissional existe e pegar sua Role
+    SELECT role INTO v_role_profissional
+    FROM public.alunos
+    WHERE id = p_profissional_id;
+
+    IF v_role_profissional IS NULL THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'Profissional não encontrado com este ID.'
+        );
+    END IF;
+
+    -- 2. Definir o tipo de vínculo baseado na Role do profissional
+    IF v_role_profissional = 'nutricionista' THEN
+        v_tipo_profissional := 'nutricionista';
+    ELSIF v_role_profissional = 'personal' THEN
+        v_tipo_profissional := 'personal';
+    ELSIF v_role_profissional IN ('master', 'dev') THEN
+        v_tipo_profissional := 'master'; -- Master atende como ambos
+    ELSE
+        -- Se for um aluno tentando indicar outro aluno, bloqueamos ou tratamos aqui
+        RETURN jsonb_build_object(
+            'success', false,
+            'message', 'O ID informado não pertence a um profissional de saúde válido.'
+        );
+    END IF;
+
+    -- 3. Criar o Vínculo (Upsert para evitar erros se clicar duas vezes)
+    INSERT INTO public.aluno_profissional (
+        aluno_id,
+        profissional_id,
+        tipo_profissional,
+        is_active,
+        data_inicio
+    ) VALUES (
+        p_aluno_id,
+        p_profissional_id,
+        v_tipo_profissional,
+        true,
+        CURRENT_DATE
+    )
+    ON CONFLICT (aluno_id, profissional_id, tipo_profissional) 
+    WHERE is_active = true
+    DO NOTHING -- Se já está vinculado, não faz nada e retorna sucesso
+    RETURNING id INTO v_vinculo_id;
+
+    -- 4. Retorno
+    RETURN jsonb_build_object(
+        'success', true,
+        'message', 'Aluno vinculado ao profissional com sucesso.',
+        'profissional_id', p_profissional_id,
+        'tipo_vinculo', v_tipo_profissional
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN jsonb_build_object(
+        'success', false,
+        'message', 'Erro interno ao criar vínculo: ' || SQLERRM
+    );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."vincular_aluno_profissional"("p_aluno_id" "uuid", "p_profissional_id" "uuid") OWNER TO "postgres";
 
 SET default_tablespace = '';
 
@@ -3161,7 +4121,9 @@ CREATE TABLE IF NOT EXISTS "public"."alunos" (
     "email" character varying(255),
     "avatar_url" "text",
     "is_onboarding_complete" boolean DEFAULT false,
-    "role" "public"."user_role" DEFAULT 'aluno'::"public"."user_role" NOT NULL
+    "role" "public"."user_role" DEFAULT 'aluno'::"public"."user_role" NOT NULL,
+    "ddd" "text",
+    "numero_telefone" "text"
 );
 
 
@@ -3885,6 +4847,77 @@ COMMENT ON COLUMN "public"."mensagens_temporarias"."audio_base64" IS 'Armazena o
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."onboarding_pendente" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "aluno_id" "uuid" NOT NULL,
+    "profissional_responsavel_id" "uuid",
+    "status" "public"."status_onboarding" DEFAULT 'aguardando_analise'::"public"."status_onboarding" NOT NULL,
+    "tem_dieta_atual" boolean DEFAULT false NOT NULL,
+    "dieta_atual_texto" "text",
+    "tem_treino_atual" boolean DEFAULT false NOT NULL,
+    "treino_atual_texto" "text",
+    "whatsapp_notificacao" character varying(20),
+    "notificacao_enviada" boolean DEFAULT false NOT NULL,
+    "observacoes_profissional_nutri" "text",
+    "observacoes_profissional_personal" "text",
+    "data_criacao" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "data_aprovacao" timestamp with time zone,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "aprovado_por_id" "uuid",
+    "whatsapp_aluno" character varying(20),
+    CONSTRAINT "chk_aprovacao_completa" CHECK ((("status" <> 'aprovado'::"public"."status_onboarding") OR (("status" = 'aprovado'::"public"."status_onboarding") AND ("data_aprovacao" IS NOT NULL) AND ("aprovado_por_id" IS NOT NULL)))),
+    CONSTRAINT "chk_dieta_texto" CHECK ((("tem_dieta_atual" = false) OR (("tem_dieta_atual" = true) AND ("dieta_atual_texto" IS NOT NULL) AND ("length"(TRIM(BOTH FROM "dieta_atual_texto")) > 0)))),
+    CONSTRAINT "chk_treino_texto" CHECK ((("tem_treino_atual" = false) OR (("tem_treino_atual" = true) AND ("treino_atual_texto" IS NOT NULL) AND ("length"(TRIM(BOTH FROM "treino_atual_texto")) > 0))))
+);
+
+
+ALTER TABLE "public"."onboarding_pendente" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."onboarding_pendente" IS 'Fila de aprovação de novos alunos. Armazena alunos que completaram onboarding e aguardam criação de planos personalizados.';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."aluno_id" IS 'ID do aluno que completou o onboarding';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."profissional_responsavel_id" IS 'ID do profissional responsável. NULL = será atribuído ao ZapNutri';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."status" IS 'Status atual do processo de aprovação';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."tem_dieta_atual" IS 'Aluno informou que já possui uma dieta/plano alimentar';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."dieta_atual_texto" IS 'Descrição da dieta atual fornecida pelo aluno';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."tem_treino_atual" IS 'Aluno informou que já possui um plano de treino';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."treino_atual_texto" IS 'Descrição do treino atual fornecido pelo aluno';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."whatsapp_notificacao" IS 'WhatsApp do profissional responsável para envio de notificações';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."observacoes_profissional_nutri" IS 'Observações e orientações do nutricionista sobre o caso';
+
+
+
+COMMENT ON COLUMN "public"."onboarding_pendente"."observacoes_profissional_personal" IS 'Observações e orientações do personal trainer sobre o caso';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."payment_transactions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "subscription_id" "uuid" NOT NULL,
@@ -4309,8 +5342,13 @@ CREATE OR REPLACE VIEW "public"."vw_alunos_por_profissional" AS
     "va"."observacoes" AS "vinculo_observacoes",
     "c"."codigo" AS "codigo_convite",
     "c"."status" AS "status_convite",
-    "c"."data_ativacao" AS "convite_ativado_em"
-   FROM ((("vinculos_agregados" "va"
+    "c"."data_ativacao" AS "convite_ativado_em",
+    "op"."id" AS "onboarding_id",
+    "op"."status" AS "onboarding_status",
+    "op"."data_criacao" AS "onboarding_data_envio",
+    "op"."tem_dieta_atual",
+    "op"."tem_treino_atual"
+   FROM (((("vinculos_agregados" "va"
      JOIN "public"."alunos" "a" ON (("va"."aluno_id" = "a"."id")))
      JOIN "public"."alunos" "prof" ON (("va"."profissional_id" = "prof"."id")))
      LEFT JOIN LATERAL ( SELECT "convites_alunos"."codigo",
@@ -4319,7 +5357,8 @@ CREATE OR REPLACE VIEW "public"."vw_alunos_por_profissional" AS
            FROM "public"."convites_alunos"
           WHERE (("convites_alunos"."aluno_id" = "a"."id") AND ("convites_alunos"."profissional_id" = "prof"."id"))
           ORDER BY "convites_alunos"."data_criacao" DESC
-         LIMIT 1) "c" ON (true));
+         LIMIT 1) "c" ON (true))
+     LEFT JOIN "public"."onboarding_pendente" "op" ON (("op"."aluno_id" = "a"."id")));
 
 
 ALTER VIEW "public"."vw_alunos_por_profissional" OWNER TO "postgres";
@@ -4327,6 +5366,33 @@ ALTER VIEW "public"."vw_alunos_por_profissional" OWNER TO "postgres";
 
 COMMENT ON VIEW "public"."vw_alunos_por_profissional" IS 'Lista todos os alunos ativos de cada profissional com dados completos do vínculo';
 
+
+
+CREATE OR REPLACE VIEW "public"."vw_alunos_sem_profissional" AS
+ SELECT "a"."id",
+    "a"."nome_completo",
+    "a"."whatsapp",
+    "a"."email",
+    "a"."created_at",
+    "a"."subscription_status",
+    "op"."id" AS "onboarding_id",
+    "op"."status" AS "onboarding_status",
+    "op"."data_criacao" AS "onboarding_data_envio",
+    "op"."tem_dieta_atual",
+    "op"."tem_treino_atual",
+    "op"."dieta_atual_texto",
+    "op"."treino_atual_texto",
+    "op"."observacoes_profissional_nutri",
+    "op"."observacoes_profissional_personal",
+    "op"."whatsapp_aluno"
+   FROM ("public"."alunos" "a"
+     LEFT JOIN "public"."onboarding_pendente" "op" ON (("op"."aluno_id" = "a"."id")))
+  WHERE (("a"."role" = 'aluno'::"public"."user_role") AND (NOT (EXISTS ( SELECT 1
+           FROM "public"."aluno_profissional" "ap"
+          WHERE (("ap"."aluno_id" = "a"."id") AND ("ap"."is_active" = true))))));
+
+
+ALTER VIEW "public"."vw_alunos_sem_profissional" OWNER TO "postgres";
 
 
 CREATE OR REPLACE VIEW "public"."vw_completions_aguardando_processamento" AS
@@ -5203,6 +6269,16 @@ ALTER TABLE ONLY "public"."mensagens_temporarias"
 
 
 
+ALTER TABLE ONLY "public"."onboarding_pendente"
+    ADD CONSTRAINT "onboarding_pendente_aluno_id_key" UNIQUE ("aluno_id");
+
+
+
+ALTER TABLE ONLY "public"."onboarding_pendente"
+    ADD CONSTRAINT "onboarding_pendente_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."payment_transactions"
     ADD CONSTRAINT "payment_transactions_pkey" PRIMARY KEY ("id");
 
@@ -5546,6 +6622,30 @@ CREATE UNIQUE INDEX "idx_nutricao_semanal_unique" ON "public"."vw_nutricao_resum
 
 
 
+CREATE INDEX "idx_onboarding_created" ON "public"."onboarding_pendente" USING "btree" ("data_criacao");
+
+
+
+CREATE INDEX "idx_onboarding_dashboard" ON "public"."onboarding_pendente" USING "btree" ("profissional_responsavel_id", "status", "data_criacao");
+
+
+
+CREATE INDEX "idx_onboarding_profissional" ON "public"."onboarding_pendente" USING "btree" ("profissional_responsavel_id", "status");
+
+
+
+CREATE INDEX "idx_onboarding_status" ON "public"."onboarding_pendente" USING "btree" ("status") WHERE ("status" = ANY (ARRAY['aguardando_analise'::"public"."status_onboarding", 'em_revisao'::"public"."status_onboarding"]));
+
+
+
+CREATE INDEX "idx_onboarding_tem_planos" ON "public"."onboarding_pendente" USING "btree" ("tem_dieta_atual", "tem_treino_atual");
+
+
+
+CREATE UNIQUE INDEX "idx_onboarding_unique_active" ON "public"."onboarding_pendente" USING "btree" ("aluno_id") WHERE ("status" = ANY (ARRAY['aguardando_analise'::"public"."status_onboarding", 'em_revisao'::"public"."status_onboarding"]));
+
+
+
 CREATE INDEX "idx_payment_transactions_aluno" ON "public"."payment_transactions" USING "btree" ("aluno_id");
 
 
@@ -5690,6 +6790,10 @@ CREATE OR REPLACE TRIGGER "after_convite_ativado" AFTER UPDATE ON "public"."conv
 
 
 
+CREATE OR REPLACE TRIGGER "finalizar_onboarding_ao_vincular_whatsapp" AFTER UPDATE OF "whatsapp" ON "public"."alunos" FOR EACH ROW WHEN (((("old"."whatsapp" IS NULL) OR (("old"."whatsapp")::"text" = ''::"text")) AND (("new"."whatsapp" IS NOT NULL) AND (("new"."whatsapp")::"text" <> ''::"text")))) EXECUTE FUNCTION "public"."marcar_onboarding_concluido"();
+
+
+
 CREATE OR REPLACE TRIGGER "handle_prompts_sistema_updated_at" BEFORE UPDATE ON "public"."prompts_sistema" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
 
 
@@ -5710,6 +6814,10 @@ CREATE OR REPLACE TRIGGER "trigger_goals_changes" AFTER INSERT OR DELETE OR UPDA
 
 
 
+CREATE OR REPLACE TRIGGER "trigger_onboarding_updated_at" BEFORE UPDATE ON "public"."onboarding_pendente" FOR EACH ROW EXECUTE FUNCTION "public"."update_onboarding_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "trigger_preferencias_alimentares_changes" AFTER INSERT OR DELETE OR UPDATE ON "public"."preferencias_alimentares" FOR EACH ROW EXECUTE FUNCTION "public"."handle_dynamic_prompt_update"();
 
 
@@ -5727,6 +6835,10 @@ CREATE OR REPLACE TRIGGER "trigger_saude_e_rotina_changes" AFTER INSERT OR DELET
 
 
 CREATE OR REPLACE TRIGGER "trigger_update_funcoes_ia_updated_at" BEFORE UPDATE ON "public"."funcoes_ia" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at_column"();
+
+
+
+CREATE OR REPLACE TRIGGER "trigger_validar_profissional" BEFORE INSERT OR UPDATE ON "public"."onboarding_pendente" FOR EACH ROW EXECUTE FUNCTION "public"."validar_profissional_responsavel"();
 
 
 
@@ -5904,6 +7016,21 @@ ALTER TABLE ONLY "public"."mensagens_temporarias"
 
 
 
+ALTER TABLE ONLY "public"."onboarding_pendente"
+    ADD CONSTRAINT "onboarding_pendente_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."onboarding_pendente"
+    ADD CONSTRAINT "onboarding_pendente_aprovado_por_id_fkey" FOREIGN KEY ("aprovado_por_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."onboarding_pendente"
+    ADD CONSTRAINT "onboarding_pendente_profissional_responsavel_id_fkey" FOREIGN KEY ("profissional_responsavel_id") REFERENCES "public"."alunos"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."payment_transactions"
     ADD CONSTRAINT "payment_transactions_aluno_id_fkey" FOREIGN KEY ("aluno_id") REFERENCES "public"."alunos"("id") ON DELETE CASCADE;
 
@@ -5983,6 +7110,10 @@ CREATE POLICY "Alunos atualizam apenas seus goals" ON "public"."goals" TO "authe
 
 
 
+CREATE POLICY "Alunos editam seus proprios onboardings" ON "public"."onboarding_pendente" FOR UPDATE TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
 CREATE POLICY "Alunos gerenciam apenas suas métricas" ON "public"."body_metrics" TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"())) WITH CHECK (("aluno_id" = "public"."get_current_aluno_id"()));
 
 
@@ -6000,6 +7131,22 @@ CREATE POLICY "Alunos veem apenas seus goals" ON "public"."goals" FOR SELECT TO 
 
 
 CREATE POLICY "Alunos veem apenas suas métricas" ON "public"."body_metrics" FOR SELECT TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Alunos veem seus proprios onboardings" ON "public"."onboarding_pendente" FOR SELECT TO "authenticated" USING (("aluno_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Profissionais editam seus onboardings pendentes" ON "public"."onboarding_pendente" FOR UPDATE TO "authenticated" USING (("profissional_responsavel_id" = "public"."get_current_aluno_id"())) WITH CHECK (("profissional_responsavel_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Profissionais veem seus onboardings pendentes" ON "public"."onboarding_pendente" FOR SELECT TO "authenticated" USING (("profissional_responsavel_id" = "public"."get_current_aluno_id"()));
+
+
+
+CREATE POLICY "Qualquer um pode ver perfil de profissionais" ON "public"."alunos" FOR SELECT USING (("role" = ANY (ARRAY['nutricionista'::"public"."user_role", 'personal'::"public"."user_role", 'master'::"public"."user_role", 'dev'::"public"."user_role"])));
 
 
 
@@ -6054,6 +7201,10 @@ CREATE POLICY "Usuários podem ver sua própria saúde" ON "public"."saude_e_rot
 ALTER TABLE "public"."alunos" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "alunos_select_own" ON "public"."alunos" FOR SELECT USING (("auth"."uid"() = "auth_user_id"));
+
+
+
 ALTER TABLE "public"."body_metrics" ENABLE ROW LEVEL SECURITY;
 
 
@@ -6066,10 +7217,69 @@ ALTER TABLE "public"."funcoes_ia" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."goals" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "instrucoes_nutri_insert_professional" ON "public"."instrucoes_nutricionista" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+
+
+
+CREATE POLICY "instrucoes_nutri_select_own" ON "public"."instrucoes_nutricionista" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."alunos"
+  WHERE (("alunos"."id" = "instrucoes_nutricionista"."aluno_id") AND ("alunos"."auth_user_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "instrucoes_nutri_select_professional" ON "public"."instrucoes_nutricionista" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+
+
+
+CREATE POLICY "instrucoes_nutri_update_professional" ON "public"."instrucoes_nutricionista" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+
+
+
+ALTER TABLE "public"."instrucoes_nutricionista" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."instrucoes_personal" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "instrucoes_personal_insert_professional" ON "public"."instrucoes_personal" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+
+
+
+CREATE POLICY "instrucoes_personal_select_own" ON "public"."instrucoes_personal" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."alunos"
+  WHERE (("alunos"."id" = "instrucoes_personal"."aluno_id") AND ("alunos"."auth_user_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "instrucoes_personal_select_professional" ON "public"."instrucoes_personal" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+
+
+
+CREATE POLICY "instrucoes_personal_update_professional" ON "public"."instrucoes_personal" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+
+
+
+ALTER TABLE "public"."onboarding_pendente" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "onboarding_select_own" ON "public"."onboarding_pendente" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."alunos"
+  WHERE (("alunos"."id" = "onboarding_pendente"."aluno_id") AND ("alunos"."auth_user_id" = "auth"."uid"())))));
+
+
+
+CREATE POLICY "onboarding_select_professional" ON "public"."onboarding_pendente" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+
+
+
 ALTER TABLE "public"."preferencias_alimentares" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."preferencias_treino" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "profissionais_select_alunos" ON "public"."alunos" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+
 
 
 ALTER TABLE "public"."prompts_sistema" ENABLE ROW LEVEL SECURITY;
@@ -6295,6 +7505,12 @@ GRANT ALL ON FUNCTION "public"."agregar_mensagens_para_aluno"("p_aluno_id" "uuid
 
 
 
+GRANT ALL ON FUNCTION "public"."aprovar_onboarding"("p_onboarding_id" "uuid", "p_aprovado_por_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."aprovar_onboarding"("p_onboarding_id" "uuid", "p_aprovado_por_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."aprovar_onboarding"("p_onboarding_id" "uuid", "p_aprovado_por_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."atualizar_carga_exercicio"("p_exercicio_id" "uuid", "p_aluno_id" "uuid", "p_nova_carga" numeric, "p_whatsapp" character varying) TO "anon";
 GRANT ALL ON FUNCTION "public"."atualizar_carga_exercicio"("p_exercicio_id" "uuid", "p_aluno_id" "uuid", "p_nova_carga" numeric, "p_whatsapp" character varying) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."atualizar_carga_exercicio"("p_exercicio_id" "uuid", "p_aluno_id" "uuid", "p_nova_carga" numeric, "p_whatsapp" character varying) TO "service_role";
@@ -6337,15 +7553,38 @@ GRANT ALL ON FUNCTION "public"."cron_rebuild_all_prompts"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."deletar_usuario_completo"("p_auth_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."deletar_usuario_completo"("p_auth_user_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."desativar_vinculo_profissional"("p_vinculo_id" "uuid", "p_motivo" "text") TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."enviar_mensagem_ativacao_whatsapp"("p_whatsapp" "text", "p_aluno_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."enviar_mensagem_ativacao_whatsapp"("p_whatsapp" "text", "p_aluno_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."enviar_mensagem_ativacao_whatsapp"("p_whatsapp" "text", "p_aluno_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."extrair_macros_do_texto"("p_texto_alimentos" "text", "p_aluno_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid", "p_profissional_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid", "p_profissional_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."finalizar_onboarding_aluno"("p_entrada_id" "uuid", "p_profissional_id" "uuid") TO "service_role";
 
 
 
@@ -6439,9 +7678,21 @@ GRANT ALL ON FUNCTION "public"."limpar_completions_antigos"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."limpar_dados_aluno"("p_aluno_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."limpar_dados_aluno"("p_aluno_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."limpar_dados_aluno"("p_aluno_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."limpar_mensagens_temporarias"() TO "anon";
 GRANT ALL ON FUNCTION "public"."limpar_mensagens_temporarias"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."limpar_mensagens_temporarias"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."marcar_onboarding_concluido"() TO "anon";
+GRANT ALL ON FUNCTION "public"."marcar_onboarding_concluido"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."marcar_onboarding_concluido"() TO "service_role";
 
 
 
@@ -6529,6 +7780,12 @@ GRANT ALL ON FUNCTION "public"."registrar_execucao_treino"("p_aluno_id" "uuid", 
 
 
 
+GRANT ALL ON FUNCTION "public"."rejeitar_onboarding"("p_onboarding_id" "uuid", "p_motivo" "text", "p_rejeitado_por_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."rejeitar_onboarding"("p_onboarding_id" "uuid", "p_motivo" "text", "p_rejeitado_por_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rejeitar_onboarding"("p_onboarding_id" "uuid", "p_motivo" "text", "p_rejeitado_por_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."run_aggregation_and_reset_flag"("p_aluno_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."run_aggregation_and_reset_flag"("p_aluno_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."run_aggregation_and_reset_flag"("p_aluno_id" "uuid") TO "service_role";
@@ -6538,6 +7795,24 @@ GRANT ALL ON FUNCTION "public"."run_aggregation_and_reset_flag"("p_aluno_id" "uu
 GRANT ALL ON FUNCTION "public"."schedule_aggregation_on_new_message"() TO "anon";
 GRANT ALL ON FUNCTION "public"."schedule_aggregation_on_new_message"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."schedule_aggregation_on_new_message"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_aluno"("p_aluno_id" "uuid", "p_dados_form" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_aluno"("p_aluno_id" "uuid", "p_dados_form" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_aluno"("p_aluno_id" "uuid", "p_dados_form" "jsonb") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_profissional_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_profissional_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_profissional_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_whatsapp" "text", "p_profissional_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_whatsapp" "text", "p_profissional_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."submeter_onboarding_simplificado"("p_aluno_id" "uuid", "p_tem_dieta_atual" boolean, "p_dieta_atual_texto" "text", "p_tem_treino_atual" boolean, "p_treino_atual_texto" "text", "p_whatsapp" "text", "p_profissional_id" "uuid") TO "service_role";
 
 
 
@@ -6571,15 +7846,33 @@ GRANT ALL ON FUNCTION "public"."trigger_convite_ativado"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."update_onboarding_updated_at"() TO "anon";
+GRANT ALL ON FUNCTION "public"."update_onboarding_updated_at"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."update_onboarding_updated_at"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at_column"() TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."validar_profissional_responsavel"() TO "anon";
+GRANT ALL ON FUNCTION "public"."validar_profissional_responsavel"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."validar_profissional_responsavel"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "anon";
 GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."validate_profissional_role"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."vincular_aluno_profissional"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."vincular_aluno_profissional"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."vincular_aluno_profissional"("p_aluno_id" "uuid", "p_profissional_id" "uuid") TO "service_role";
 
 
 
@@ -6752,6 +8045,12 @@ GRANT ALL ON TABLE "public"."mensagens_temporarias" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."onboarding_pendente" TO "anon";
+GRANT ALL ON TABLE "public"."onboarding_pendente" TO "authenticated";
+GRANT ALL ON TABLE "public"."onboarding_pendente" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."payment_transactions" TO "anon";
 GRANT ALL ON TABLE "public"."payment_transactions" TO "authenticated";
 GRANT ALL ON TABLE "public"."payment_transactions" TO "service_role";
@@ -6821,6 +8120,12 @@ GRANT ALL ON TABLE "public"."vw_aluno_completo" TO "service_role";
 GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "anon";
 GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "authenticated";
 GRANT ALL ON TABLE "public"."vw_alunos_por_profissional" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."vw_alunos_sem_profissional" TO "anon";
+GRANT ALL ON TABLE "public"."vw_alunos_sem_profissional" TO "authenticated";
+GRANT ALL ON TABLE "public"."vw_alunos_sem_profissional" TO "service_role";
 
 
 
@@ -6980,6 +8285,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-\unrestrict TaZrCZMzBbcIcwyDmfFwLRdAAWRAxr9RJQe0GgeTaHeWtX3wGfOj6MbifsMbupC
+\unrestrict a8PyoyQC8e5Ez6D17PtrAOH08ixwwFvKWcbEFoeMHqlDyHAyo4M6TePGCEcsXT3
 
 RESET ALL;

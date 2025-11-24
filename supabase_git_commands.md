@@ -63,8 +63,8 @@ supabase functions download chat-nutricionista --project-ref hiufaonhsxlnoozwbyg
 supabase functions download chat-personal --project-ref hiufaonhsxlnoozwbygq
 supabase functions download criar-dieta-completa --project-ref hiufaonhsxlnoozwbygq
 supabase functions download processar-dieta-completa --project-ref hiufaonhsxlnoozwbygq
-
-
+supabase functions download ativar-convite-aluno --project-ref hiufaonhsxlnoozwbygq
+supabase functions download metabolismo_basal --project-ref hiufaonhsxlnoozwbygq
 
 
 
