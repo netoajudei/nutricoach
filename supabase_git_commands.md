@@ -65,9 +65,19 @@ supabase functions download criar-dieta-completa --project-ref hiufaonhsxlnoozwb
 supabase functions download processar-dieta-completa --project-ref hiufaonhsxlnoozwbygq
 supabase functions download ativar-convite-aluno --project-ref hiufaonhsxlnoozwbygq
 supabase functions download metabolismo_basal --project-ref hiufaonhsxlnoozwbygq
-
-
-
+supabase functions download iniciar-conversa --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  cron-preparar-avaliacoes --project-ref hiufaonhsxlnoozwbygq
+supabase functions download cron-gerar-avaliacoes  --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  cron-backup-conversations --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  processar-resposta-botao --project-ref hiufaonhsxlnoozwbygq
+supabase functions download enviar_menssagem_whatsapp_oficial  --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-registro-refeicao-meta  --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-medidas-corporais-meta  --project-ref hiufaonhsxlnoozwbygq
+supabase functions download propor-atualizacao-carga-meta  --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  propor-conclusao-treino-meta --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  reenviar-botao-pendente --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  upload-media-zapnutri --project-ref hiufaonhsxlnoozwbygq
+supabase functions download  enviar_template_meta --project-ref hiufaonhsxlnoozwbygq
 
 
 ```

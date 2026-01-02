@@ -80,9 +80,12 @@ serve(async (req)=>{
   console.log(`[CRIAR-EXERCICIOS] 🚀 Início: ${startedAt}`);
   try {
     const body = await req.json().catch(()=>({}));
-    const { programas_criados } = body;
+    const { programas_criados, input_texto } = body;
     if (!programas_criados || !Array.isArray(programas_criados)) {
       throw new Error("programas_criados ausente ou inválido");
+    }
+    if (!input_texto) {
+      throw new Error("input_texto ausente");
     }
     console.log(`[1] ✅ ${programas_criados.length} programas recebidos`);
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
@@ -137,6 +140,16 @@ serve(async (req)=>{
           {
             type: "input_text",
             text: prompt_final
+          }
+        ]
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: input_texto
           }
         ]
       }

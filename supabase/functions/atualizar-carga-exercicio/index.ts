@@ -330,7 +330,7 @@ function j(body, status = 200) {
 }
 /** Usa tua edge `enviar_menssagem_whatsapp` para entregar texto ao aluno */ async function sendMensagemWhatsapp(supabase, aluno_id, mensagem) {
   try {
-    await supabase.functions.invoke("enviar_menssagem_whatsapp", {
+    await supabase.functions.invoke("enviar_menssagem_whatsapp_oficial", {
       body: {
         aluno_id,
         mensagem

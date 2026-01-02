@@ -124,7 +124,7 @@ serve(async (req)=>{
     // 3. ENVIAR RESPOSTA AO USUÁRIO
     // ============================================
     console.log('[FINALIZAR E LIMPAR] 📱 Enviando mensagem ao usuário...');
-    await supabase.functions.invoke('enviar_menssagem_whatsapp', {
+    await supabase.functions.invoke('enviar_menssagem_whatsapp_oficial', {
       body: {
         aluno_id: aluno_id,
         mensagem: respostaIA

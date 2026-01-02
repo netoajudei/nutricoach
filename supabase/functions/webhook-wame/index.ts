@@ -1,18 +1,17 @@
 /**
  * @name webhook-wame
- * @version 4.1.0
+ * @version 4.2.0 (Patch Android/iOS sobre v4.1.0)
  * @author NutriCoach AI Development Team
- * 
- * @description
+ * * @description
  * Webhook para receber mensagens do WAME.
  * Sistema de botões dinâmico com tabela botoes_ativos.
  * Suporte a vinculação UUID/@lid para onboarding.
- * 
- * @changelog
+ * * @changelog
+ * - v4.2.0: Adicionado suporte a templateButtonReplyMessage (Android) e interactiveMessage (iOS)
  * - v4.1.0: Adicionado suporte a vinculação UUID/@lid
- *   - Detecção correta de @lid via data.isLid
- *   - Ramificação para UUID quando aluno não encontrado
- *   - Mensagem de boas-vindas automática
+ * - Detecção correta de @lid via data.isLid
+ * - Ramificação para UUID quando aluno não encontrado
+ * - Mensagem de boas-vindas automática
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
@@ -26,12 +25,12 @@ serve(async (req)=>{
     });
   }
   try {
-    console.log('[WEBHOOK-WAME v4.1] 📥 Webhook recebido');
+    console.log('[WEBHOOK-WAME v4.2] 📥 Webhook recebido - Versão Patch');
     const body = await req.json();
     // 🔥 LOG COMPLETO DO PAYLOAD RECEBIDO
     console.log('═══════════════════════════════════════');
     console.log('📦 PAYLOAD COMPLETO RECEBIDO:');
-    console.log(JSON.stringify(body, null, 2));
+    // console.log(JSON.stringify(body, null, 2)); // Comentado para não poluir, descomente se precisar
     console.log('═══════════════════════════════════════');
     const data = body.data || body;
     if (!data) {
@@ -60,11 +59,6 @@ serve(async (req)=>{
     let { data: aluno, error: alunoError } = await supabase.from('alunos').select('id, whatsapp').eq('whatsapp', whatsappNumber).single();
     // ========================================
     // RAMIFICAÇÃO: SE ALUNO NÃO ENCONTRADO
-    // ========================================
-    // ========================================
-    // ========================================
-    // SUBSTITUIR O BLOCO COMPLETO "if (alunoError || !aluno)"
-    // Das linhas ~60 até ~150
     // ========================================
     if (alunoError || !aluno) {
       console.log('[WEBHOOK-WAME] 👤 Aluno não encontrado');
@@ -104,11 +98,35 @@ serve(async (req)=>{
             // Enviar mensagem de boas-vindas
             const { data: configData } = await supabase.from('config_sistema').select('valor').eq('chave', 'wame_api_key').single();
             if (configData) {
-              const mensagemBoasVindas = `✅ *Cadastro concluído com sucesso!*
+              const mensagemBoasVindas = `👋 *Seja muito bem-vindo(a) ao ZapNutri, ${alunoByUuid.nome_completo}!*
 
-Olá ${alunoByUuid.nome_completo}, seja bem-vindo(a) ao ZapNutri! 💪
+A partir de agora, sua jornada fitness ficou muito mais simples e inteligente.
 
-Agora você já pode conversar comigo. Como posso te ajudar hoje?`;
+🎯 *Seu plano está pronto!*
+Criamos seu Plano Alimentar e Programa de Treino personalizados. Acesse o app para visualizar todos os detalhes:
+👉 https://zapnutri.app
+
+🧠 *Pense em mim como sua equipe de elite 24 horas*
+Imagine ter um Nutricionista Esportivo e um Personal Trainer morando no seu WhatsApp, prontos para te responder a qualquer momento.
+
+Estou aqui para gerenciar sua rotina. Veja como posso te ajudar:
+
+🍽️ *NO COMANDO DA DIETA*
+- Dúvidas? "Quantas calorias tem esse prato?" ou "Posso comer isso agora?"
+- Substituições Inteligentes: Faltou algum ingrediente? Me avise que eu calculo a troca perfeita com o que você tem em casa.
+- Registro Automático: Terminou de comer? Apenas me diga "Comi meu café da manhã" e eu salvo tudo no seu histórico.
+
+💪 *NO COMANDO DO TREINO*
+- Execução e Dúvidas: Não sabe como fazer um exercício? É só perguntar.
+- Check-in de Treino: Acabou a sessão? Me avise "Terminei o treino de hoje" para mantermos sua frequência em dia.
+- Evolução de Cargas: Aumentou o peso no Supino? Me conte! Eu atualizo sua ficha para garantir sua progressão.
+
+⚖️ *MONITORAMENTO*
+- Se pesou? Me mande o valor que eu gero o gráfico da sua evolução.
+
+Estou aqui para te orientar, ajustar a rota e garantir que você chegue no seu objetivo.
+
+🚀 *Então, qual é o nosso primeiro passo de hoje? Refeição ou Treino?*`;
               await fetch(`https://us.api-wa.me/${configData.valor}/message/text`, {
                 method: 'POST',
                 headers: {
@@ -229,11 +247,11 @@ Agora você já pode conversar comigo. Como posso te ajudar hoje?`;
           break;
         }
       // ========================================
-      // CASE 2: BOTÃO (messageContextInfo)
+      // CASE 2 (LEGADO): messageContextInfo (Seu formato antigo)
       // ========================================
       case 'messageContextInfo':
         {
-          console.log('[WEBHOOK-WAME] 🔘 Botão detectado');
+          console.log('[WEBHOOK-WAME] 🔘 Botão detectado (ContextInfo)');
           const buttonsResponse = data.msgContent?.buttonsResponseMessage;
           if (!buttonsResponse) {
             console.warn('[WEBHOOK-WAME] ⚠️ buttonsResponseMessage não encontrado');
@@ -241,54 +259,55 @@ Agora você já pode conversar comigo. Como posso te ajudar hoje?`;
               headers: corsHeaders
             });
           }
-          console.log('[WEBHOOK-WAME] 📋 selectedButtonId:', buttonsResponse.selectedButtonId);
-          // Parse do botão
-          let buttonData;
-          try {
-            buttonData = JSON.parse(buttonsResponse.selectedButtonId);
-            console.log('[WEBHOOK-WAME] ✅ Button data parsed:', buttonData);
-          } catch (parseError) {
-            console.error('[WEBHOOK-WAME] ❌ Erro ao parsear botão:', parseError);
-            return new Response('ok: erro parse', {
+          // Usa a função auxiliar para processar
+          await processarAcaoBotao(supabase, buttonsResponse.selectedButtonId);
+          break;
+        }
+      // ========================================
+      // CASE 2.1 (NOVO): templateButtonReplyMessage (Android Novo)
+      // ========================================
+      case 'templateButtonReplyMessage':
+        {
+          console.log('[WEBHOOK-WAME] 🔘 Botão detectado (Template/Android)');
+          const templateResponse = data.msgContent?.templateButtonReplyMessage;
+          if (!templateResponse || !templateResponse.selectedId) {
+            console.warn('[WEBHOOK-WAME] ⚠️ selectedId não encontrado no Template');
+            return new Response('ok: no template data', {
               headers: corsHeaders
             });
           }
-          const { action } = buttonData;
-          console.log('[WEBHOOK-WAME] 🎯 Action:', action);
-          // Roteamento dinâmico
-          if (action === 'resposta_botao') {
-            console.log('[WEBHOOK-WAME] 🎯 Processando resposta de botão');
-            const { botao_id, confirmado } = buttonData;
-            if (!botao_id) {
-              throw new Error('botao_id ausente');
+          // Usa a função auxiliar para processar
+          await processarAcaoBotao(supabase, templateResponse.selectedId);
+          break;
+        }
+      // ========================================
+      // CASE 2.2 (NOVO): interactiveMessage (iPhone/Universal)
+      // ========================================
+      case 'interactiveMessage':
+        {
+          console.log('[WEBHOOK-WAME] 🔘 Botão detectado (Interactive)');
+          const interactive = data.msgContent?.interactiveMessage;
+          let selectedId = null;
+          if (interactive?.nativeFlowResponseMessage) {
+            try {
+              const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+              selectedId = params.id;
+            } catch (e) {
+              console.error('Erro parse native flow', e);
             }
-            console.log('[WEBHOOK-WAME] 🔍 Buscando botão:', botao_id);
-            console.log('[WEBHOOK-WAME] 📋 Confirmado:', confirmado);
-            // Buscar botão no banco
-            const { data: botao, error: botaoErr } = await supabase.from('botoes_ativos').select('edge_function, tipo_acao').eq('id', botao_id).single();
-            if (botaoErr || !botao) {
-              console.error('[WEBHOOK-WAME] ❌ Botão não encontrado:', botaoErr?.message);
-              throw new Error('Botão não encontrado no banco');
-            }
-            console.log('[WEBHOOK-WAME] ✅ Botão encontrado');
-            console.log('[WEBHOOK-WAME] 📦 Tipo:', botao.tipo_acao);
-            console.log('[WEBHOOK-WAME] 🎯 Edge Function:', botao.edge_function);
-            // Invocar edge function
-            console.log('[WEBHOOK-WAME] 🚀 Invocando', botao.edge_function);
-            const { error: edgeError } = await supabase.functions.invoke(botao.edge_function, {
-              body: {
-                botao_id: botao_id,
-                confirmado: confirmado
-              }
-            });
-            if (edgeError) {
-              console.error('[WEBHOOK-WAME] ❌ Erro na edge function:', edgeError);
-              throw edgeError;
-            }
-            console.log('[WEBHOOK-WAME] ✅ Botão processado com sucesso!');
-          } else {
-            console.warn('[WEBHOOK-WAME] ⚠️ Action desconhecida:', action);
+          } else if (interactive?.listResponseMessage) {
+            selectedId = interactive.listResponseMessage.singleSelectReply.selectedRowId;
+          } else if (interactive?.buttonReplyMessage) {
+            selectedId = interactive.buttonReplyMessage.selectedId;
           }
+          if (!selectedId) {
+            console.warn('[WEBHOOK-WAME] ⚠️ ID não encontrado no Interactive');
+            return new Response('ok: no interactive id', {
+              headers: corsHeaders
+            });
+          }
+          // Usa a função auxiliar para processar
+          await processarAcaoBotao(supabase, selectedId);
           break;
         }
       // ========================================
@@ -353,6 +372,52 @@ Agora você já pode conversar comigo. Como posso te ajudar hoje?`;
     });
   }
 });
+// ========================================
+// FUNÇÃO AUXILIAR: PROCESSAR AÇÃO BOTÃO
+// (Centraliza a lógica de confirmar/cancelar)
+// ========================================
+async function processarAcaoBotao(supabase, payloadString) {
+  console.log('[PROCESSAR BOTÃO] 📋 Payload:', payloadString);
+  // Parse do botão
+  let buttonData;
+  try {
+    buttonData = JSON.parse(payloadString);
+    console.log('[PROCESSAR BOTÃO] ✅ Parsed:', buttonData);
+  } catch (parseError) {
+    console.error('[PROCESSAR BOTÃO] ❌ Erro ao parsear JSON:', parseError);
+    return;
+  }
+  const { action } = buttonData;
+  console.log('[PROCESSAR BOTÃO] 🎯 Action:', action);
+  if (action === 'resposta_botao') {
+    console.log('[PROCESSAR BOTÃO] 🎯 Iniciando processamento');
+    const { botao_id, confirmado } = buttonData;
+    if (!botao_id) throw new Error('botao_id ausente');
+    console.log('[PROCESSAR BOTÃO] 🔍 Buscando botão:', botao_id);
+    // Buscar botão no banco
+    const { data: botao, error: botaoErr } = await supabase.from('botoes_ativos').select('edge_function, tipo_acao').eq('id', botao_id).single();
+    if (botaoErr || !botao) {
+      console.error('[PROCESSAR BOTÃO] ❌ Botão não encontrado ou expirado:', botaoErr?.message);
+      return; // Retorna silenciosamente para não travar o webhook
+    }
+    console.log('[PROCESSAR BOTÃO] ✅ Botão encontrado. Tipo:', botao.tipo_acao);
+    console.log('[PROCESSAR BOTÃO] 🚀 Invocando Edge Function:', botao.edge_function);
+    // Invocar edge function
+    const { error: edgeError } = await supabase.functions.invoke(botao.edge_function, {
+      body: {
+        botao_id: botao_id,
+        confirmado: confirmado
+      }
+    });
+    if (edgeError) {
+      console.error('[PROCESSAR BOTÃO] ❌ Erro na edge function:', edgeError);
+      throw edgeError;
+    }
+    console.log('[PROCESSAR BOTÃO] ✅ Botão processado com sucesso!');
+  } else {
+    console.warn('[PROCESSAR BOTÃO] ⚠️ Action desconhecida:', action);
+  }
+}
 // ========================================
 // FUNÇÃO AUXILIAR: REENVIAR BOTÃO
 // ========================================

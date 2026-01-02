@@ -10,6 +10,13 @@
  * 
  * @changelog
  * - v4.0.0: Integração com tabela botoes_ativos (UPSERT)
+/**
+ * @name propor-atualizacao-carga
+ * @version 5.0.0
+ * @author NutriCoach AI Development Team
+ * @description
+ * Edge Function ADAPTADA para receber logs completos de treino (Carga, Series, Repetições).
+ * Formata mensagem de confirmação para log de exercício.
  */ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 const corsHeaders = {
@@ -23,56 +30,57 @@ serve(async (req)=>{
     });
   }
   try {
-    console.log('[PROPOR CARGA v4.0] 🚀 Iniciando');
+    console.log('[PROPOR LOG v5.0] 🚀 Iniciando');
     const { aluno_id, conversation_id, tool_call_id, argumentos } = await req.json();
     // ========================================
-    // VALIDAÇÕES
+    // 1. VALIDAÇÕES BÁSICAS
     // ========================================
     if (!aluno_id || !conversation_id || !tool_call_id || !argumentos) {
       throw new Error('Parâmetros obrigatórios faltando: aluno_id, conversation_id, tool_call_id, argumentos');
     }
-    const { id_exercicio, variacao_de_carga, nome_exercicio } = argumentos;
-    if (!id_exercicio || variacao_de_carga === undefined) {
-      throw new Error('Argumentos incompletos: id_exercicio e variacao_de_carga são obrigatórios');
+    // ADAPTAÇÃO: Lendo os novos argumentos misturados
+    // O ID pode vir como id_exercicio ou exercicio_id, garantimos pegar um deles
+    const id_exercicio_real = argumentos.id_exercicio || argumentos.exercicio_id;
+    const { nome_exercicio, carga_levantada, quant_series, quant_repeticoes } = argumentos;
+    if (!id_exercicio_real || !carga_levantada || !quant_series || !quant_repeticoes) {
+      throw new Error('Argumentos incompletos: Faltando id, carga, séries ou repetições.');
     }
-    console.log('[PROPOR CARGA v4.0] 📋 Dados recebidos:');
-    console.log('[PROPOR CARGA v4.0] - Aluno ID:', aluno_id);
-    console.log('[PROPOR CARGA v4.0] - Conversation ID:', conversation_id);
-    console.log('[PROPOR CARGA v4.0] - Tool Call ID:', tool_call_id);
-    console.log('[PROPOR CARGA v4.0] - Exercício ID:', id_exercicio);
-    console.log('[PROPOR CARGA v4.0] - Variação:', variacao_de_carga, 'kg');
+    console.log('[PROPOR LOG v5.0] 📋 Dados recebidos:');
+    console.log(`- Exercício: ${nome_exercicio} (ID: ${id_exercicio_real})`);
+    console.log(`- Execução: ${quant_series}x${quant_repeticoes} com ${carga_levantada}kg`);
     const supabase = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
     // ========================================
-    // BUSCAR EXERCÍCIO E WHATSAPP
+    // 2. BUSCAR DADOS COMPLEMENTARES (WHATSAPP)
     // ========================================
-    console.log('[PROPOR CARGA v4.0] 🔍 Buscando exercício...');
-    const { data: exercicio, error: exercicioError } = await supabase.from('workout_exercises').select('nome_exercicio, carga_kg').eq('id', id_exercicio).single();
-    if (exercicioError || !exercicio) {
-      throw new Error('Exercício não encontrado');
-    }
+    // Mantemos a busca do aluno para pegar o WhatsApp correto e validar existência
     const { data: alunoData, error: alunoError } = await supabase.from('alunos').select('whatsapp').eq('id', aluno_id).single();
     if (alunoError || !alunoData) {
       throw new Error('Aluno não encontrado');
     }
     const whatsapp = alunoData.whatsapp;
-    const carga_atual = exercicio.carga_kg || 0;
-    const nova_carga = carga_atual + variacao_de_carga;
-    console.log('[PROPOR CARGA v4.0] ✅ Exercício:', exercicio.nome_exercicio);
-    console.log('[PROPOR CARGA v4.0] 📊 Carga atual:', carga_atual, 'kg');
-    console.log('[PROPOR CARGA v4.0] 📊 Nova carga:', nova_carga, 'kg');
-    console.log('[PROPOR CARGA v4.0] 📱 WhatsApp:', whatsapp);
+    // Opcional: Validar se exercício existe (apenas para garantir integridade)
+    const { data: exercicioCheck, error: exError } = await supabase.from('workout_exercises').select('nome_exercicio').eq('id', id_exercicio_real).single();
+    // Se o nome vier vazio no argumento, usamos do banco
+    const nomeFinal = nome_exercicio || exercicioCheck?.nome_exercicio || "Exercício";
     // ========================================
-    // CONSTRUIR MENSAGEM
+    // 3. CONSTRUIR MENSAGEM (LAYOUT NOVO)
     // ========================================
-    const mensagem_texto = variacao_de_carga > 0 ? `💪 Notei que você progrediu no exercício *${exercicio.nome_exercicio}*!
+    const mensagem_texto = `📝 *Registro de Atividade Detectado*
 
-Deseja atualizar a carga de ${carga_atual}kg para **${nova_carga}kg** no seu plano para os próximos treinos?` : `🔧 Notei um ajuste no exercício *${exercicio.nome_exercicio}*.
+Opa! Identifiquei que você acabou de realizar o exercício:
+💪 *${nomeFinal}*
 
-Deseja reduzir a carga de ${carga_atual}kg para **${nova_carga}kg** no seu plano?`;
+📊 *Detalhes da Execução:*
+• *Séries:* ${quant_series}
+• *Repetições:* ${quant_repeticoes}
+• *Carga:* ${carga_levantada} kg
+
+Deseja salvar esse registro no seu histórico de progresso? 🚀`;
     // ========================================
-    // PREPARAR PAYLOADS DOS BOTÕES
+    // 4. PREPARAR PAYLOADS DOS BOTÕES
     // ========================================
     const botao_id = crypto.randomUUID();
+    // Payload do botão SIM carrega os dados para a próxima função salvar
     const payload_sim = {
       action: 'resposta_botao',
       botao_id: botao_id,
@@ -83,63 +91,60 @@ Deseja reduzir a carga de ${carga_atual}kg para **${nova_carga}kg** no seu plano
       botao_id: botao_id,
       confirmado: false
     };
-    console.log('[PROPOR CARGA v4.0] ✅ Botão ID:', botao_id);
     // ========================================
-    // REGISTRAR BOTÃO NO BANCO (UPSERT)
+    // 5. REGISTRAR BOTÃO NO BANCO (UPSERT)
     // ========================================
-    console.log('[PROPOR CARGA v4.0] 💾 Registrando botão ativo...');
+    console.log('[PROPOR LOG v5.0] 💾 Registrando botão ativo...');
+    // ADAPTAÇÃO: Salvamos os dados EXATOS que precisamos para criar o log depois
     const { error: botaoError } = await supabase.from('botoes_ativos').upsert({
       id: botao_id,
       aluno_id: aluno_id,
       conversation_id: conversation_id,
       tool_call_id: tool_call_id,
-      tipo_acao: 'update_carga',
+      tipo_acao: 'registrar_log_exercicio',
       argumentos: {
-        exercicio_id: id_exercicio,
-        nova_carga: nova_carga,
-        carga_atual: carga_atual,
-        nome_exercicio: exercicio.nome_exercicio,
+        exercicio_id: id_exercicio_real,
+        nome_exercicio: nomeFinal,
+        carga_kg: carga_levantada,
+        series: quant_series,
+        repeticoes: quant_repeticoes,
         whatsapp: whatsapp
       },
-      edge_function: 'atualizar-carga-exercicio'
+      edge_function: 'registrar-log-treino' // Aponte para a função que cria o log (aquela que deletamos para recriar depois)
     }, {
       onConflict: 'aluno_id'
     });
     if (botaoError) {
-      console.error('[PROPOR CARGA v4.0] ❌ Erro ao registrar botão:', botaoError);
+      console.error('[PROPOR LOG v5.0] ❌ Erro ao registrar botão:', botaoError);
       throw new Error(`Erro ao registrar botão: ${botaoError.message}`);
     }
-    console.log('[PROPOR CARGA v4.0] ✅ Botão registrado');
     // ========================================
-    // BUSCAR API KEY
+    // 6. BUSCAR API KEY E ENVIAR WHATSAPP
     // ========================================
     const { data: configData, error: configError } = await supabase.from('config_sistema').select('valor').eq('chave', 'wame_api_key').single();
     if (configError || !configData) {
       throw new Error('WAME_API_KEY não encontrada');
     }
     const api_key = configData.valor;
-    // ========================================
-    // ENVIAR BOTÃO VIA WHATSAPP
-    // ========================================
-    console.log('[PROPOR CARGA v4.0] 📤 Enviando botão...');
+    console.log('[PROPOR LOG v5.0] 📤 Enviando botão...');
     const api_url = `https://us.api-wa.me/${api_key}/message/button_reply`;
     const request_body = {
       to: whatsapp,
       header: {
-        title: '💪 Confirmação de Progresso'
+        title: '📊 Confirmação de Treino'
       },
       text: mensagem_texto,
-      footer: 'Escolha uma opção:',
+      footer: 'Confirme os dados:',
       buttons: [
         {
           type: 'quick_reply',
           id: JSON.stringify(payload_sim),
-          text: '✅ Sim, atualizar!'
+          text: '✅ Sim, Salvar'
         },
         {
           type: 'quick_reply',
           id: JSON.stringify(payload_nao),
-          text: '❌ Não, manter'
+          text: '❌ Cancelar'
         }
       ]
     };
@@ -154,22 +159,13 @@ Deseja reduzir a carga de ${carga_atual}kg para **${nova_carga}kg** no seu plano
       const responseBody = await wameResponse.text();
       throw new Error(`[WAME] Erro ${wameResponse.status}: ${responseBody}`);
     }
-    console.log('[PROPOR CARGA v4.0] ✅ Botão enviado com sucesso');
-    // ========================================
-    // RETORNAR SUCESSO
-    // ========================================
+    console.log('[PROPOR LOG v5.0] ✅ Botão enviado com sucesso');
     return new Response(JSON.stringify({
       success: true,
-      message: 'Proposta de atualização enviada ao aluno',
+      message: 'Proposta de log enviada ao aluno',
       detalhes: {
-        botao_id: botao_id,
-        exercicio_id: id_exercicio,
-        nome_exercicio: exercicio.nome_exercicio,
-        carga_atual: carga_atual,
-        nova_carga: nova_carga,
-        variacao: variacao_de_carga,
-        aluno_id: aluno_id,
-        whatsapp: whatsapp
+        exercicio: nomeFinal,
+        carga: carga_levantada
       }
     }), {
       headers: {
@@ -179,7 +175,7 @@ Deseja reduzir a carga de ${carga_atual}kg para **${nova_carga}kg** no seu plano
       status: 200
     });
   } catch (error) {
-    console.error('[PROPOR CARGA v4.0] ❌ ERRO:', error.message);
+    console.error('[PROPOR LOG v5.0] ❌ ERRO:', error.message);
     return new Response(JSON.stringify({
       error: error.message
     }), {

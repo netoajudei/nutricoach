@@ -78,30 +78,25 @@ serve(async (req)=>{
     // 3. CRIAR CONVERSATION SE NÃO EXISTIR
     // ============================================
     if (!conversation_id) {
-      console.log('[Orquestrador] 3. Criando nova conversation...');
-      const createConvResponse = await fetch('https://api.openai.com/v1/conversations', {
-        method: 'POST',
+      console.log('[Orquestrador] 3. Conversation não existe - delegando para iniciar-conversa');
+      await supabase.functions.invoke('iniciar-conversa', {
+        body: {
+          aluno_id: aluno_id,
+          mensagem_id: mensagem_id
+        }
+      });
+      console.log('[Orquestrador] ⏸️ ENCERRADO (iniciar-conversa assumiu controle)');
+      return new Response(JSON.stringify({
+        success: true,
+        delegated_to: 'iniciar-conversa',
+        message: 'Processamento delegado - iniciar-conversa chamará orquestrador novamente'
+      }), {
         headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          ...corsHeaders,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          metadata: {
-            aluno_id: aluno_id,
-            tipo: 'coaching_nutricional'
-          }
-        })
+        status: 200
       });
-      if (!createConvResponse.ok) {
-        const errorText = await createConvResponse.text();
-        throw new Error(`Erro ao criar conversation: ${errorText}`);
-      }
-      const convData = await createConvResponse.json();
-      conversation_id = convData.id;
-      console.log('[Orquestrador] ✅ Conversation criada:', conversation_id);
-      await supabase.from('dynamic_prompts').update({
-        conversation_id: conversation_id
-      }).eq('id', promptId);
     }
     // ============================================
     // 4. DEFINIR TOOLS (DINAMICAMENTE)
@@ -244,7 +239,7 @@ serve(async (req)=>{
       resposta: respostaIA
     }).eq('id', mensagem_id);
     // Enviar resposta ao usuário
-    await supabase.functions.invoke('enviar_menssagem_whatsapp', {
+    await supabase.functions.invoke('enviar_menssagem_whatsapp_oficial', {
       body: {
         aluno_id: aluno_id,
         mensagem: respostaIA

@@ -95,7 +95,7 @@ async function finalizarToolCallEChamarWhatsApp(supabase, conversation_id, tool_
     console.log(`[finalizarToolCall] 💬 Resposta da IA: ${respostaIA.substring(0, 100)}`);
     // Enviar a resposta da IA para o usuário
     console.log(`[finalizarToolCall] 📱 Enviando mensagem para o usuário...`);
-    await supabase.functions.invoke('enviar_menssagem_whatsapp', {
+    await supabase.functions.invoke('enviar_menssagem_whatsapp_oficial', {
       body: {
         aluno_id: aluno_id,
         mensagem: respostaIA

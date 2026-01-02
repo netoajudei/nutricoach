@@ -69,7 +69,7 @@ serve(async (req)=>{
     // ETAPA 2: BUSCAR CONVERSATION_ID EXISTENTE
     // ============================================
     console.log(`[2] 🔍 Buscando conversation_id existente...`);
-    const { data: instrData, error: instrErr } = await supabase.from("instrucoes_nutricionista").select("id, conversation_id, instrucoes_texto").eq("aluno_id", aluno_id).maybeSingle();
+    const { data: instrData, error: instrErr } = await supabase.from("instrucoes_nutricionista").select("id, instrucoes_texto").eq("aluno_id", aluno_id).maybeSingle();
     if (instrErr) {
       throw new Error(`Erro ao buscar instruções: ${instrErr.message}`);
     }
@@ -178,25 +178,6 @@ serve(async (req)=>{
         throw new Error(`Erro ao inicializar conversation: ${await initialResponse.text()}`);
       }
       console.log(`[3.9] ✅ System prompt enviado`);
-      // 3.10: Criar ou atualizar registro em instrucoes_nutricionista
-      if (!instrucoes_id) {
-        const { data: insertData, error: insertErr } = await supabase.from("instrucoes_nutricionista").insert({
-          aluno_id: aluno_id,
-          conversation_id: conversation_id,
-          instrucoes_texto: "",
-          instrucoes_ia: ""
-        }).select("id").single();
-        if (insertErr) {
-          throw new Error(`Erro ao criar instrucoes_nutricionista: ${insertErr.message}`);
-        }
-        instrucoes_id = insertData.id;
-        console.log(`[3.10] ✅ Registro criado: ${instrucoes_id}`);
-      } else {
-        await supabase.from("instrucoes_nutricionista").update({
-          conversation_id: conversation_id
-        }).eq("id", instrucoes_id);
-        console.log(`[3.10] ✅ Conversation ID atualizado no registro`);
-      }
     }
     // ============================================
     // ETAPA 4: ENVIAR MENSAGEM DO NUTRICIONISTA
@@ -246,10 +227,13 @@ serve(async (req)=>{
     console.log(`[6] 💾 Salvando resposta...`);
     console.log(`[6] 🆔 Aluno ID: ${aluno_id}`);
     console.log(`[6] 📝 Resposta (${resposta_ia.length} chars): "${resposta_ia.substring(0, 200)}..."`);
-    const { data: updateData, error: updateErr } = await supabase.from("instrucoes_nutricionista").update({
+    const { data: updateData, error: updateErr } = await supabase.from("instrucoes_nutricionista").upsert({
+      aluno_id: aluno_id,
       instrucoes_da_ia: resposta_ia,
       updated_at: new Date().toISOString()
-    }).eq("aluno_id", aluno_id).select();
+    }, {
+      onConflict: 'aluno_id'
+    }).select();
     if (updateErr) {
       console.error(`[6] ❌ Erro no UPDATE: ${updateErr.message}`);
       throw new Error(`Erro ao salvar resposta: ${updateErr.message}`);
@@ -276,9 +260,10 @@ serve(async (req)=>{
       }
     });
   } catch (error) {
-    console.error(`[ERRO] ${error.message}`);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[ERRO] ${errorMessage}`);
     return jsonResponse({
-      error: error.message
+      error: errorMessage
     }, 500);
   }
 });
